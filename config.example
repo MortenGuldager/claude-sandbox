@@ -1,0 +1,56 @@
+# Claude Sandbox configuration
+#
+# Copy this file to ~/.config/claude-sandbox/config and uncomment the
+# settings you want to override. All defaults below match what the tool
+# uses when no config file is present, so you only need this file if you
+# want to change something.
+#
+# This file is sourced by bash; quote values that contain spaces.
+
+# --- Sandbox container -----------------------------------------------------
+
+# Incus image to launch.
+#SANDBOX_IMAGE="images:ubuntu/24.04"
+
+# Where the host project directory is mounted inside the sandbox.
+#SANDBOX_PROJECT_PATH="/home/ubuntu/project"
+
+# Note: the Claude auth token is NOT configured here — it is read from
+# the CLAUDE_SANDBOX_AUTH environment variable at sandbox-create time,
+# and forwarded into the sandbox as ANTHROPIC_AUTH_TOKEN. See README.
+
+# --- Status reporter -------------------------------------------------------
+#
+# A small service inside the sandbox polls ~/.claude/sessions/*.json and
+# publishes a JSON payload via the chosen backend. Use it to drive a
+# status indicator (e.g. a desk traffic light) or a dashboard.
+#
+# Backends:
+#   none    Disable publishing entirely.
+#   stdout  Write each payload to the systemd journal (default; use
+#           `incus exec <container> journalctl -u claude-status-reporter`
+#           to inspect).
+#   file    Append each payload as one JSON line to REPORTER_FILE_PATH.
+#   mqtt    Publish via mosquitto_pub. Requires the mqtt backend at
+#           sandbox-create time (the installer adds mosquitto-clients).
+#   http    POST each payload to REPORTER_HTTP_URL.
+
+#REPORTER_BACKEND="stdout"
+#REPORTER_INTERVAL=15
+
+# --- file backend ----------------------------------------------------------
+#REPORTER_FILE_PATH="/var/log/claude-status.jsonl"
+
+# --- mqtt backend ----------------------------------------------------------
+# WARNING: public brokers (test.mosquitto.org, broker.hivemq.com, ...) are
+# fully public — anyone can subscribe to any topic. If you publish to one,
+# pick a topic that is not guessable (e.g. a UUID) and assume the data is
+# visible to the world.
+#REPORTER_MQTT_HOST="test.mosquitto.org"
+#REPORTER_MQTT_PORT=1883
+#REPORTER_MQTT_TOPIC=""
+#REPORTER_MQTT_USER=""
+#REPORTER_MQTT_PASS=""
+
+# --- http backend ----------------------------------------------------------
+#REPORTER_HTTP_URL=""

@@ -1,0 +1,498 @@
+#!/usr/bin/env bash
+# claude-sandbox — manage Incus-based sandboxes for running Claude Code
+# against a project directory mounted from the host.
+#
+# Configuration is read from $CLAUDE_SANDBOX_CONFIG (default
+# ~/.config/claude-sandbox/config). All settings have sensible defaults,
+# so the tool works out of the box without a config file.
+#
+# Sandboxes are launched from a cached "base" image whose name embeds a
+# hash of the inputs that produced it (source image, package list,
+# reporter assets, schema version). When inputs change, the hash
+# changes, and the next `create` builds a fresh base. Stale bases stay
+# until removed with `gc` or `rebuild-base`.
+
+set -euo pipefail
+
+SCRIPT_PATH="$(readlink -f "$0")"
+SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
+ASSETS_DIR="$(cd "$SCRIPT_DIR/../container" && pwd)"
+
+# Bumped manually when build logic changes in a way not captured by the
+# other hash inputs (e.g. we add a new step that doesn't affect any
+# tracked file). Forces a rebuild.
+BASE_SCHEMA_VERSION=1
+
+# Packages installed into the base image. Order does not matter; the
+# hash sorts before digesting. `npm` is intentionally absent — it ships
+# bundled with NodeSource's `nodejs`, and Ubuntu's distro `npm` declares
+# Conflicts: nodejs against it.
+BASE_PACKAGES=(nodejs git curl jq mosquitto-clients)
+
+BASE_ALIAS_PREFIX="claude-sandbox-base-"
+BASE_AGE_WARN_DAYS=30
+
+# --- Defaults ---------------------------------------------------------------
+
+SANDBOX_IMAGE="images:ubuntu/24.04"
+SANDBOX_PROJECT_PATH="/home/ubuntu/project"
+
+REPORTER_BACKEND="stdout"
+REPORTER_INTERVAL=15
+REPORTER_FILE_PATH="/var/log/claude-status.jsonl"
+REPORTER_MQTT_HOST=""
+REPORTER_MQTT_PORT=1883
+REPORTER_MQTT_TOPIC=""
+REPORTER_MQTT_USER=""
+REPORTER_MQTT_PASS=""
+REPORTER_HTTP_URL=""
+
+# --- Load user config -------------------------------------------------------
+
+CONFIG_FILE="${CLAUDE_SANDBOX_CONFIG:-$HOME/.config/claude-sandbox/config}"
+if [ -f "$CONFIG_FILE" ]; then
+    # shellcheck source=/dev/null
+    . "$CONFIG_FILE"
+fi
+
+# --- Derived values ---------------------------------------------------------
+
+REPO_DIR="$(pwd)"
+PATH_HASH="$(printf '%s' "$REPO_DIR" | md5sum | cut -c1-6)"
+DIR_NAME="$(basename "$REPO_DIR" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]//g')"
+CONTAINER_NAME="csb-$DIR_NAME-$PATH_HASH"
+
+compute_base_hash() {
+    local pkgs_sorted reporter_sh_sum reporter_svc_sum
+    pkgs_sorted="$(printf '%s\n' "${BASE_PACKAGES[@]}" | LC_ALL=C sort | tr '\n' ' ')"
+    reporter_sh_sum="$(sha256sum "$ASSETS_DIR/claude-status-reporter.sh"      | awk '{print $1}')"
+    reporter_svc_sum="$(sha256sum "$ASSETS_DIR/claude-status-reporter.service" | awk '{print $1}')"
+    {
+        printf 'schema=%s\n'       "$BASE_SCHEMA_VERSION"
+        printf 'image=%s\n'        "$SANDBOX_IMAGE"
+        printf 'pkgs=%s\n'         "$pkgs_sorted"
+        printf 'reporter_sh=%s\n'  "$reporter_sh_sum"
+        printf 'reporter_svc=%s\n' "$reporter_svc_sum"
+    } | sha256sum | cut -c1-12
+}
+
+BASE_HASH="$(compute_base_hash)"
+BASE_ALIAS="${BASE_ALIAS_PREFIX}${BASE_HASH}"
+BUILD_CONTAINER="csb-build-${BASE_HASH}"
+
+# --- Helpers ----------------------------------------------------------------
+
+show_help() {
+    cat <<EOF
+Claude Sandbox Manager
+----------------------
+Repo:      $REPO_DIR
+Container: $CONTAINER_NAME
+Base:      local:$BASE_ALIAS
+Config:    $CONFIG_FILE $( [ -f "$CONFIG_FILE" ] || echo '(not present; using defaults)' )
+
+Usage: $(basename "$0") <command> [args]
+
+Commands:
+  create               Launch and provision the sandbox container.
+                       Builds the base image first if it is missing.
+  map [serial_port]    Pass a USB/serial device into the sandbox
+                       (default: ttyACM0).
+  shell                Open a login shell inside the sandbox.
+  info                 Show sandbox status and mounted devices.
+  destroy              Delete the sandbox container.
+  bases                List cached base images with age and status.
+  rebuild-base         Force a rebuild of the current base image.
+  gc                   Delete cached base images that don't match the
+                       current hash.
+  help                 Show this help.
+
+Typical flow: create -> [map ttyACM0] -> shell -> destroy
+EOF
+}
+
+container_exists() {
+    incus list --format csv -c n | grep -q "^${1}$"
+}
+
+image_alias_exists() {
+    incus image list local: --format csv -c l | grep -q "^${1}$"
+}
+
+require_container() {
+    if ! container_exists "$CONTAINER_NAME"; then
+        echo "Sandbox '$CONTAINER_NAME' does not exist. Run: $(basename "$0") create" >&2
+        exit 1
+    fi
+}
+
+get_usb_ids() {
+    local dev_name vid pid
+    dev_name="$(basename "$1")"
+    [ -e "/dev/$dev_name" ] || return 1
+    vid="$(udevadm info -a -n "/dev/$dev_name" | grep '{idVendor}'  | head -n1 | cut -d'"' -f2)"
+    pid="$(udevadm info -a -n "/dev/$dev_name" | grep '{idProduct}' | head -n1 | cut -d'"' -f2)"
+    printf '%s:%s\n' "$vid" "$pid"
+}
+
+# Quote a value for use in a systemd EnvironmentFile (also valid when
+# bash-sourced). The value is wrapped in double quotes; backslashes,
+# double quotes, dollar signs, and backticks are escaped.
+quote_env_value() {
+    local s="$1"
+    s="${s//\\/\\\\}"
+    s="${s//\"/\\\"}"
+    s="${s//\$/\\\$}"
+    s="${s//\`/\\\`}"
+    printf '"%s"' "$s"
+}
+
+write_reporter_env_file() {
+    local out="$1"
+    {
+        printf '%s=%s\n' DEVELOPER_NAME    "$(quote_env_value "${USER:-unknown}")"
+        printf '%s=%s\n' REPORTER_BACKEND  "$(quote_env_value "$REPORTER_BACKEND")"
+        printf '%s=%s\n' REPORTER_INTERVAL "$(quote_env_value "$REPORTER_INTERVAL")"
+        case "$REPORTER_BACKEND" in
+            file)
+                printf '%s=%s\n' REPORTER_FILE_PATH "$(quote_env_value "$REPORTER_FILE_PATH")"
+                ;;
+            mqtt)
+                printf '%s=%s\n' REPORTER_MQTT_HOST  "$(quote_env_value "$REPORTER_MQTT_HOST")"
+                printf '%s=%s\n' REPORTER_MQTT_PORT  "$(quote_env_value "$REPORTER_MQTT_PORT")"
+                printf '%s=%s\n' REPORTER_MQTT_TOPIC "$(quote_env_value "$REPORTER_MQTT_TOPIC")"
+                printf '%s=%s\n' REPORTER_MQTT_USER  "$(quote_env_value "$REPORTER_MQTT_USER")"
+                printf '%s=%s\n' REPORTER_MQTT_PASS  "$(quote_env_value "$REPORTER_MQTT_PASS")"
+                ;;
+            http)
+                printf '%s=%s\n' REPORTER_HTTP_URL "$(quote_env_value "$REPORTER_HTTP_URL")"
+                ;;
+        esac
+    } > "$out"
+}
+
+# Returns the age of the base image in days, or empty if unknown.
+base_image_age_days() {
+    local uploaded
+    uploaded="$(incus image list local: --format json 2>/dev/null | \
+        jq -r --arg a "$BASE_ALIAS" '
+            .[] | select(.aliases[]?.name == $a) | .uploaded_at
+        ' | head -n1)"
+    [ -n "$uploaded" ] || return 0
+    local then_s now_s
+    then_s="$(date -d "$uploaded" +%s 2>/dev/null || echo "")"
+    [ -n "$then_s" ] || return 0
+    now_s="$(date +%s)"
+    echo $(( (now_s - then_s) / 86400 ))
+}
+
+# --- Base image build -------------------------------------------------------
+
+build_base_image() {
+    echo "Building base image local:$BASE_ALIAS (this is the slow step; subsequent sandboxes reuse it)..."
+
+    if container_exists "$BUILD_CONTAINER"; then
+        echo "Build container '$BUILD_CONTAINER' already exists." >&2
+        echo "Either another build is in progress, or a previous build crashed." >&2
+        echo "If you're sure nothing is running, remove it with:" >&2
+        echo "  incus delete -f $BUILD_CONTAINER" >&2
+        exit 1
+    fi
+
+    # Clean up the build container on any exit path. Don't touch the
+    # published image on failure — we only publish on success.
+    trap 'incus delete -f "$BUILD_CONTAINER" >/dev/null 2>&1 || true' EXIT
+
+    echo "  Launching build container from $SANDBOX_IMAGE..."
+    incus launch "$SANDBOX_IMAGE" "$BUILD_CONTAINER"
+
+    echo "  Waiting for network..."
+    # shellcheck disable=SC2016 # script body runs inside the container
+    incus exec "$BUILD_CONTAINER" -- bash -c '
+        for _ in $(seq 1 30); do
+            getent hosts deb.nodesource.com >/dev/null 2>&1 && exit 0
+            sleep 1
+        done
+        echo "network did not come up within 30s" >&2
+        exit 1
+    '
+
+    echo "  Updating apt index and upgrading packages..."
+    incus exec "$BUILD_CONTAINER" -- env DEBIAN_FRONTEND=noninteractive apt-get update
+    incus exec "$BUILD_CONTAINER" -- env DEBIAN_FRONTEND=noninteractive apt-get -y upgrade
+
+    echo "  Adding NodeSource repository..."
+    incus exec "$BUILD_CONTAINER" -- bash -c \
+        "curl -fsSL https://deb.nodesource.com/setup_20.x | bash -"
+
+    echo "  Installing packages: ${BASE_PACKAGES[*]}"
+    incus exec "$BUILD_CONTAINER" -- env DEBIAN_FRONTEND=noninteractive \
+        apt-get install -y "${BASE_PACKAGES[@]}"
+
+    echo "  Installing @anthropic-ai/claude-code..."
+    incus exec "$BUILD_CONTAINER" -- npm install -g @anthropic-ai/claude-code
+
+    echo "  Installing claude-status-reporter assets..."
+    incus file push "$ASSETS_DIR/claude-status-reporter.sh" \
+        "$BUILD_CONTAINER/usr/local/bin/claude-status-reporter.sh" --mode 0755
+    incus file push "$ASSETS_DIR/claude-status-reporter.service" \
+        "$BUILD_CONTAINER/etc/systemd/system/claude-status-reporter.service" --mode 0644
+
+    # Enable (but don't start) the service. The env file is per-instance
+    # and is pushed during cmd_create, before the container is started
+    # for real, so the unit's first activation already sees it.
+    incus exec "$BUILD_CONTAINER" -- systemctl daemon-reload
+    incus exec "$BUILD_CONTAINER" -- systemctl enable claude-status-reporter.service
+
+    # apt cache cleanup keeps the published image small.
+    incus exec "$BUILD_CONTAINER" -- env DEBIAN_FRONTEND=noninteractive \
+        apt-get clean
+
+    echo "  Stopping build container..."
+    incus stop "$BUILD_CONTAINER"
+
+    echo "  Publishing as local:$BASE_ALIAS..."
+    incus publish "$BUILD_CONTAINER" --alias "$BASE_ALIAS" \
+        description="claude-sandbox base ($BASE_HASH, schema=$BASE_SCHEMA_VERSION)" >/dev/null
+
+    # Build container is removed by the EXIT trap.
+    echo "Base image ready."
+}
+
+ensure_base_image() {
+    if image_alias_exists "$BASE_ALIAS"; then
+        local age
+        age="$(base_image_age_days || true)"
+        if [ -n "$age" ] && [ "$age" -gt "$BASE_AGE_WARN_DAYS" ]; then
+            echo "Note: base image local:$BASE_ALIAS is $age days old."
+            echo "      Run '$(basename "$0") rebuild-base' to refresh apt packages and claude-code." >&2
+        fi
+        return 0
+    fi
+    build_base_image
+}
+
+# --- Commands ---------------------------------------------------------------
+
+cmd_create() {
+    if container_exists "$CONTAINER_NAME"; then
+        echo "Sandbox '$CONTAINER_NAME' already exists."
+        return 0
+    fi
+
+    ensure_base_image
+
+    echo "Creating sandbox from local:$BASE_ALIAS..."
+    incus init "local:$BASE_ALIAS" "$CONTAINER_NAME" -c security.privileged=true
+    incus config set "$CONTAINER_NAME" user.meta.hostpath "$REPO_DIR"
+    incus config set "$CONTAINER_NAME" user.meta.base-hash "$BASE_HASH"
+
+    echo "Mounting project files..."
+    incus config device add "$CONTAINER_NAME" project-files disk \
+        source="$REPO_DIR" \
+        path="$SANDBOX_PROJECT_PATH" >/dev/null
+
+    echo "Writing reporter config (backend=$REPORTER_BACKEND)..."
+    local tmp
+    tmp="$(mktemp)"
+    write_reporter_env_file "$tmp"
+    incus file push "$tmp" \
+        "$CONTAINER_NAME/etc/claude-status-reporter.env" --mode 0644
+    rm -f "$tmp"
+
+    echo "Starting sandbox..."
+    incus start "$CONTAINER_NAME"
+
+    if [ -n "${CLAUDE_SANDBOX_AUTH-}" ]; then
+        printf "export ANTHROPIC_AUTH_TOKEN=%q\n" "$CLAUDE_SANDBOX_AUTH" | \
+            incus exec "$CONTAINER_NAME" -- sudo -u ubuntu tee -a /home/ubuntu/.bashrc > /dev/null
+    else
+        echo "Note: \$CLAUDE_SANDBOX_AUTH is not set on the host; skipping token forwarding." >&2
+        echo "      To forward an auth token next time, run:" >&2
+        echo "        CLAUDE_SANDBOX_AUTH=<token> $(basename "$0") create" >&2
+    fi
+
+    echo "Sandbox is ready."
+}
+
+cmd_map() {
+    require_container
+    local port_name="${1:-ttyACM0}"
+    local port_path="/dev/$port_name"
+
+    if [ ! -e "$port_path" ]; then
+        echo "Device $port_path not found on host." >&2
+        exit 1
+    fi
+
+    local ids vid pid
+    ids="$(get_usb_ids "$port_name" || true)"
+    if [ -z "$ids" ] || [ "$ids" = ":" ]; then
+        echo "Could not determine USB IDs for $port_path." >&2
+        exit 1
+    fi
+    vid="${ids%:*}"
+    pid="${ids#*:}"
+
+    echo "Identified hardware: vendor=$vid, product=$pid"
+
+    incus config device remove "$CONTAINER_NAME" claude-usb 2>/dev/null || true
+    incus config device remove "$CONTAINER_NAME" serial-dev 2>/dev/null || true
+
+    incus config device add "$CONTAINER_NAME" claude-usb usb \
+        vendorid="$vid" \
+        productid="$pid"
+
+    incus config device add "$CONTAINER_NAME" serial-dev unix-char \
+        source="$port_path" \
+        path="$port_path" \
+        mode=0666
+
+    echo "Device mapped: $port_path"
+}
+
+cmd_shell() {
+    require_container
+    echo "Opening shell in $CONTAINER_NAME..."
+    incus exec "$CONTAINER_NAME" -- sudo --login --user ubuntu
+}
+
+cmd_info() {
+    if ! container_exists "$CONTAINER_NAME"; then
+        echo "No sandbox found for this directory."
+        return 0
+    fi
+    local status mapped base_hash
+    status="$(incus info "$CONTAINER_NAME" | awk '/^Status/{print $2}')"
+    mapped="$(incus config get "$CONTAINER_NAME" user.meta.hostpath)"
+    base_hash="$(incus config get "$CONTAINER_NAME" user.meta.base-hash)"
+    echo "Sandbox info:"
+    echo "  Name:      $CONTAINER_NAME"
+    echo "  Status:    $status"
+    echo "  Repo:      $mapped"
+    echo "  Reporter:  $REPORTER_BACKEND"
+    echo "  Built on:  ${base_hash:-<unknown>} (current: $BASE_HASH)"
+    if [ -n "$base_hash" ] && [ "$base_hash" != "$BASE_HASH" ]; then
+        echo "             (sandbox predates current base; recreate to update)"
+    fi
+    echo
+    echo "Devices:"
+    incus config show "$CONTAINER_NAME" --expanded | \
+        grep -E "^\s+(source|path):" | sed 's/^/  /'
+}
+
+cmd_destroy() {
+    incus delete -f "$CONTAINER_NAME"
+    echo "Sandbox deleted."
+}
+
+cmd_bases() {
+    local rows
+    rows="$(incus image list local: --format json 2>/dev/null | jq -r \
+        --arg prefix "$BASE_ALIAS_PREFIX" \
+        --arg current "$BASE_ALIAS" \
+        '
+            .[]
+            | . as $img
+            | .aliases[]?
+            | select(.name | startswith($prefix))
+            | [
+                (.name | sub($prefix; "")),
+                ($img.uploaded_at // ""),
+                ($img.size // 0),
+                (if .name == $current then "current" else "stale" end)
+              ]
+            | @tsv
+        ')"
+
+    if [ -z "$rows" ]; then
+        echo "No claude-sandbox base images cached."
+        echo "Run '$(basename "$0") create' to build one."
+        return 0
+    fi
+
+    printf 'Base images (current hash: %s)\n\n' "$BASE_HASH"
+    printf '  %-14s %-8s %-8s %s\n' "HASH" "AGE" "SIZE" "STATUS"
+
+    local now_s saw_stale=0
+    now_s="$(date +%s)"
+
+    while IFS=$'\t' read -r hash uploaded size status; do
+        local age size_h then_s
+        if [ -n "$uploaded" ] && then_s="$(date -d "$uploaded" +%s 2>/dev/null)"; then
+            age="$(( (now_s - then_s) / 86400 ))d"
+        else
+            age="?"
+        fi
+        size_h="$(numfmt --to=iec --suffix=B "$size" 2>/dev/null || echo "${size}B")"
+        printf '  %-14s %-8s %-8s %s\n' "$hash" "$age" "$size_h" "$status"
+        [ "$status" = "stale" ] && saw_stale=1
+    done <<< "$rows"
+
+    if [ "$saw_stale" -eq 1 ]; then
+        echo
+        echo "Run '$(basename "$0") gc' to remove stale bases."
+    fi
+}
+
+cmd_rebuild_base() {
+    if image_alias_exists "$BASE_ALIAS"; then
+        echo "Removing existing local:$BASE_ALIAS..."
+        incus image delete "local:$BASE_ALIAS"
+    fi
+    build_base_image
+}
+
+cmd_gc() {
+    local aliases_csv stale=()
+    aliases_csv="$(incus image list local: --format csv -c l 2>/dev/null || true)"
+    if [ -z "$aliases_csv" ]; then
+        echo "No local images."
+        return 0
+    fi
+    while IFS= read -r alias_line; do
+        case "$alias_line" in
+            "${BASE_ALIAS_PREFIX}"*)
+                if [ "$alias_line" != "$BASE_ALIAS" ]; then
+                    stale+=("$alias_line")
+                fi
+                ;;
+        esac
+    done <<< "$aliases_csv"
+
+    if [ "${#stale[@]}" -eq 0 ]; then
+        echo "Nothing to gc. Current base: local:$BASE_ALIAS"
+        return 0
+    fi
+
+    echo "Stale base images:"
+    printf '  %s\n' "${stale[@]}"
+    echo
+    read -r -p "Delete these? [y/N] " reply
+    case "$reply" in
+        y|Y|yes|YES)
+            for a in "${stale[@]}"; do
+                incus image delete "local:$a"
+                echo "  deleted $a"
+            done
+            ;;
+        *)
+            echo "Aborted."
+            ;;
+    esac
+}
+
+# --- Dispatch ---------------------------------------------------------------
+
+case "${1:-help}" in
+    create)         shift; cmd_create        "$@" ;;
+    map)            shift; cmd_map           "$@" ;;
+    shell)          shift; cmd_shell         "$@" ;;
+    info)           shift; cmd_info          "$@" ;;
+    destroy)        shift; cmd_destroy       "$@" ;;
+    bases)          shift; cmd_bases         "$@" ;;
+    rebuild-base)   shift; cmd_rebuild_base  "$@" ;;
+    gc)             shift; cmd_gc            "$@" ;;
+    help|-h|--help) show_help ;;
+    *)              show_help; exit 1 ;;
+esac
