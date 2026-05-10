@@ -45,7 +45,7 @@ seconds. See [Base image caching](#base-image-caching) below.
 Clone this repo and run the installer as root:
 
 ```sh
-git clone https://github.com/<you>/claude-sandbox.git
+git clone https://github.com/MortenGuldager/claude-sandbox.git
 cd claude-sandbox
 sudo ./install.sh
 ```
@@ -86,6 +86,19 @@ auth'd yet. Set it in your shell profile, or pass it inline as above.
 
 The container name is derived from your project path, so multiple
 checkouts of the same repo each get their own sandbox.
+
+## Running Claude inside the sandbox
+
+Two ways to invoke it:
+
+- `claude` — default. Prompts for permission on tool calls, like a
+  host install.
+- `yolo-claude` — alias for `claude --dangerously-skip-permissions`.
+  Skips all prompts; the sandbox isolation is the load-bearing
+  protection. Before using it, make sure no identity keys (SSH, GPG,
+  cloud credentials, GitHub tokens) have leaked into the mounted
+  project directory — anything inside the mount is fair game for a
+  prompted-or-tricked agent.
 
 ## Base image caching
 

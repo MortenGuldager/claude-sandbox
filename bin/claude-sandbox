@@ -21,7 +21,7 @@ ASSETS_DIR="$(cd "$SCRIPT_DIR/../container" && pwd)"
 # Bumped manually when build logic changes in a way not captured by the
 # other hash inputs (e.g. we add a new step that doesn't affect any
 # tracked file). Forces a rebuild.
-BASE_SCHEMA_VERSION=1
+BASE_SCHEMA_VERSION=2
 
 # Packages installed into the base image. Order does not matter; the
 # hash sorts before digesting. `npm` is intentionally absent — it ships
@@ -231,6 +231,10 @@ build_base_image() {
 
     echo "  Installing @anthropic-ai/claude-code..."
     incus exec "$BUILD_CONTAINER" -- npm install -g @anthropic-ai/claude-code
+
+    echo "  Installing yolo-claude alias..."
+    echo "alias yolo-claude='claude --dangerously-skip-permissions'" | \
+        incus exec "$BUILD_CONTAINER" -- sudo -u ubuntu tee -a /home/ubuntu/.bashrc > /dev/null
 
     echo "  Installing claude-status-reporter assets..."
     incus file push "$ASSETS_DIR/claude-status-reporter.sh" \
