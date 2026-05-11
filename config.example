@@ -21,39 +21,26 @@
 
 # --- Status reporter -------------------------------------------------------
 #
-# A small service inside the sandbox watches ~/.claude/sessions/*.json via
-# inotify and publishes a JSON payload whenever the aggregated status
-# changes, plus a keep-alive every REPORTER_KEEPALIVE seconds so a
-# subscriber that comes online late still learns the current state.
-#
-# Payload: {"sessions":{"<sessionId>":"<status>",...}}.
-# Keys are sorted for deterministic dedup. Consumers should key off
-# sessionId, not position, so multiple sandboxes can publish to the same
-# subscriber without colliding. Identifying info (developer, hostname) is
-# intentionally omitted — encode it in the MQTT topic / HTTP URL.
-#
-# Backends:
-#   none    Disable publishing entirely.
-#   stdout  Write each payload to the systemd journal (default; use
-#           `incus exec <container> journalctl -u claude-status-reporter`
-#           to inspect).
-#   file    Append each payload as one JSON line to REPORTER_FILE_PATH.
-#   mqtt    Publish via mosquitto_pub with -r (retained). Requires the
-#           mqtt backend at sandbox-create time (the installer adds
-#           mosquitto-clients).
-#   http    POST each payload to REPORTER_HTTP_URL.
+# `create` installs claude-status-reporter into the sandbox as a systemd
+# service. See https://github.com/MortenGuldager/claude-status-reporter
+# for the payload schema, backend details, and the public-MQTT-broker
+# warning.
 
+# Upstream source. Override to pin a SHA or test a fork; changing either
+# triggers a base-image rebuild on the next `create`.
+#REPORTER_REPO="MortenGuldager/claude-status-reporter"
+#REPORTER_REF="main"
+
+# Backend: none | stdout | file | mqtt | http.
 #REPORTER_BACKEND="stdout"
+
+# Seconds between keep-alive reports (changes are sent immediately).
 #REPORTER_KEEPALIVE=60
 
 # --- file backend ----------------------------------------------------------
 #REPORTER_FILE_PATH="/var/log/claude-status.jsonl"
 
 # --- mqtt backend ----------------------------------------------------------
-# WARNING: public brokers (test.mosquitto.org, broker.hivemq.com, ...) are
-# fully public — anyone can subscribe to any topic. If you publish to one,
-# pick a topic that is not guessable (e.g. a UUID) and assume the data is
-# visible to the world.
 #REPORTER_MQTT_HOST="test.mosquitto.org"
 #REPORTER_MQTT_PORT=1883
 #REPORTER_MQTT_TOPIC=""

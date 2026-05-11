@@ -6,9 +6,14 @@ spins up disposable containers for running
 project directory mounted from the host. Optionally maps a USB/serial
 device into the sandbox so Claude can talk to attached hardware.
 
-A companion service inside the sandbox polls Claude's session state
-and publishes it via a configurable backend (stdout, file, MQTT, HTTP),
-so you can drive a desk indicator, dashboard, or whatever else.
+A companion service inside the sandbox publishes Claude's session
+status to a configurable backend (stdout, file, MQTT, HTTP), so you
+can drive a desk indicator, dashboard, or whatever else. That service
+lives in its own repo —
+[claude-status-reporter][reporter] — and is fetched and installed by
+`claude-sandbox create`. You don't need to install it separately.
+
+[reporter]: https://github.com/MortenGuldager/claude-status-reporter
 
 > **Renamed from `ai-sandbox` on 2026-05-10.** This was originally
 > framed as a generic AI sandbox, but in practice it only ever
@@ -37,8 +42,10 @@ On the host:
   on most distros)
 
 The first `create` builds a cached base image with Node.js, Claude
-Code, and the reporter; subsequent `create`s launch from that base in
-seconds. See [Base image caching](#base-image-caching) below.
+Code, and the reporter (fetched from
+[`MortenGuldager/claude-status-reporter`][reporter]); subsequent
+`create`s launch from that base in seconds. See [Base image
+caching](#base-image-caching) below.
 
 ## Install
 
@@ -116,12 +123,18 @@ The hash is a digest of the inputs that produced the image:
 
 - the source image (`SANDBOX_IMAGE`),
 - the package list,
-- the contents of the reporter `.sh` and `.service` files,
+- the resolved upstream commit SHA of
+  `$REPORTER_REPO@$REPORTER_REF` (default
+  `MortenGuldager/claude-status-reporter@main`),
 - a schema version baked into the script.
 
-Change any of those — pin a different Ubuntu, edit the reporter — and
-the next `create` notices the hash drift and rebuilds. Nothing else
-needs to change. The old base lingers until you remove it.
+Change any of those — pin a different Ubuntu, bump the reporter, point
+at a fork — and the next `create` notices the hash drift and rebuilds.
+Nothing else needs to change. The old base lingers until you remove it.
+
+The reporter SHA is resolved via the GitHub API on each invocation and
+cached locally for 5 minutes (`~/.cache/claude-sandbox/`). If you're
+offline, the last cached SHA is used.
 
 This is the same idea as a Docker layer keyed off its build context,
 collapsed to a single layer on purpose: one cached image solves
@@ -169,48 +182,23 @@ variable, not from the config file — see [Quickstart](#quickstart).
 
 ## Status reporter
 
-A systemd service inside the sandbox runs `claude-status-reporter.sh`,
-which watches `~/.claude/sessions/` via inotify and publishes a payload
-whenever the aggregated status changes. A keep-alive is also emitted
-every `REPORTER_KEEPALIVE` seconds (default 60) so a subscriber that
-was offline at boot still learns the current state.
+`claude-sandbox create` installs
+[claude-status-reporter][reporter] inside the sandbox as a systemd
+service. It watches `~/.claude/sessions/` and publishes the aggregated
+status to a configurable backend (stdout, file, MQTT, HTTP).
 
-Payload:
+You configure backend and credentials through the `REPORTER_*` settings
+in `~/.config/claude-sandbox/config` (see `config.example`).
+`claude-sandbox` translates those into the sandbox's
+`/etc/claude-status-reporter.env` at create-time.
 
-```json
-{
-  "sessions": {
-    "c632fc39-11d4-4d63-9dda-74d14706f07b": "busy",
-    "9c0dd5a5-1e3d-4af8-b4e5-d43975c9b38e": "idle"
-  }
-}
-```
+For the payload schema, full backend details, the public-MQTT-broker
+warning, and instructions for installing the reporter outside of
+claude-sandbox (e.g. in a WSL2 distro), see the [reporter repo][reporter].
 
-`sessions` is a map from `sessionId` to `status`, built from
-`~/.claude/sessions/*.json` (empty object when no sessions exist).
-Consumers should key off `sessionId`, not position — two sandboxes
-publishing to the same subscriber will not collide on slot 0.
-Identifying info (developer, hostname) is intentionally omitted —
-encode it in the MQTT topic / HTTP URL.
-
-### Backends
-
-- **`none`** — disabled.
-- **`stdout`** *(default)* — writes to the journal:
-  `incus exec <container> -- journalctl -u claude-status-reporter -f`.
-- **`file`** — appends one JSON line per report to `REPORTER_FILE_PATH`.
-- **`mqtt`** — publishes via `mosquitto_pub` with `-r` (retained), so
-  late subscribers immediately receive the last status. The installer
-  adds `mosquitto-clients` to the container.
-- **`http`** — POSTs `application/json` to `REPORTER_HTTP_URL`.
-
-### Public MQTT brokers
-
-If you point the MQTT backend at a public broker
-(`test.mosquitto.org`, `broker.hivemq.com`, ...), assume your data is
-visible to the world. Pick a topic that is not guessable — a UUID is a
-reasonable default. For anything you would rather not broadcast, run
-your own broker.
+To override which version is installed — pin to a SHA or test a fork —
+set `REPORTER_REPO` and/or `REPORTER_REF` in your config. The next
+`create` builds a fresh base image keyed off the new pin.
 
 ## Migration from `ai-sandbox`
 
@@ -248,12 +236,13 @@ is unchanged — those names were already Claude-specific.
 ## Project layout
 
 ```
-bin/claude-sandbox                      # host-side CLI
-container/claude-status-reporter.sh     # pushed into the sandbox
-container/claude-status-reporter.service
-config.example                          # documented settings
+bin/claude-sandbox    # host-side CLI
+config.example        # documented settings
 install.sh / uninstall.sh
 ```
+
+The reporter is no longer vendored here; `create` fetches it from
+[`MortenGuldager/claude-status-reporter`][reporter].
 
 ## License
 

@@ -17,14 +17,10 @@ fi
 SOURCE="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 
 echo "Installing claude-sandbox to $PREFIX"
-install -d "$PREFIX/bin" "$PREFIX/container"
+install -d "$PREFIX/bin"
 
 install -m 0755 "$SOURCE/bin/claude-sandbox" \
     "$PREFIX/bin/claude-sandbox"
-install -m 0755 "$SOURCE/container/claude-status-reporter.sh" \
-    "$PREFIX/container/claude-status-reporter.sh"
-install -m 0644 "$SOURCE/container/claude-status-reporter.service" \
-    "$PREFIX/container/claude-status-reporter.service"
 install -m 0644 "$SOURCE/config.example" "$PREFIX/config.example"
 install -m 0644 "$SOURCE/README.md"      "$PREFIX/README.md"
 install -m 0644 "$SOURCE/LICENSE"        "$PREFIX/LICENSE"

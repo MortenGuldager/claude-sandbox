@@ -8,7 +8,7 @@
 #
 # Sandboxes are launched from a cached "base" image whose name embeds a
 # hash of the inputs that produced it (source image, package list,
-# reporter assets, schema version). When inputs change, the hash
+# reporter upstream SHA, schema version). When inputs change, the hash
 # changes, and the next `create` builds a fresh base. Stale bases stay
 # until removed with `gc` or `rebuild-base`.
 
@@ -16,12 +16,11 @@ set -euo pipefail
 
 SCRIPT_PATH="$(readlink -f "$0")"
 SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
-ASSETS_DIR="$(cd "$SCRIPT_DIR/../container" && pwd)"
 
 # Bumped manually when build logic changes in a way not captured by the
 # other hash inputs (e.g. we add a new step that doesn't affect any
 # tracked file). Forces a rebuild.
-BASE_SCHEMA_VERSION=3
+BASE_SCHEMA_VERSION=4
 
 # Packages installed into the base image. Order does not matter; the
 # hash sorts before digesting. `npm` is intentionally absent — it ships
@@ -36,6 +35,15 @@ BASE_AGE_WARN_DAYS=30
 
 SANDBOX_IMAGE="images:ubuntu/24.04"
 SANDBOX_PROJECT_PATH="/home/ubuntu/project"
+
+# Upstream source for the status reporter. `create` fetches this repo at
+# the resolved ref into the sandbox and runs its install.sh during the
+# base-image build. Override via the config file or the environment if
+# you want to test against a fork or pin a specific SHA — unlike the
+# other defaults (which only honor the config file), these two also
+# honor process-level env vars so one-off testing is friction-free.
+REPORTER_REPO="${REPORTER_REPO:-MortenGuldager/claude-status-reporter}"
+REPORTER_REF="${REPORTER_REF:-main}"
 
 REPORTER_BACKEND="stdout"
 REPORTER_KEEPALIVE=60
@@ -62,21 +70,62 @@ PATH_HASH="$(printf '%s' "$REPO_DIR" | md5sum | cut -c1-6)"
 DIR_NAME="$(basename "$REPO_DIR" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]//g')"
 CONTAINER_NAME="csb-$DIR_NAME-$PATH_HASH"
 
+# Resolve $REPORTER_REF (a branch or tag) to a concrete commit SHA via the
+# GitHub API. Cached on disk for $REPORTER_SHA_CACHE_TTL seconds so common
+# read commands (help, info, bases) don't make a network call every time.
+# On network failure, falls back to any prior cached value regardless of
+# age — keeps offline operation working as long as the cache has been
+# warmed once.
+REPORTER_SHA_CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/claude-sandbox"
+REPORTER_SHA_CACHE_TTL=300
+
+resolve_reporter_sha() {
+    local key cache_file age sha
+    key="$(printf '%s@%s' "$REPORTER_REPO" "$REPORTER_REF" | md5sum | cut -c1-12)"
+    cache_file="$REPORTER_SHA_CACHE_DIR/reporter-sha-$key"
+
+    if [ -f "$cache_file" ]; then
+        age=$(( $(date +%s) - $(stat -c %Y "$cache_file") ))
+        if [ "$age" -lt "$REPORTER_SHA_CACHE_TTL" ]; then
+            cat "$cache_file"
+            return 0
+        fi
+    fi
+
+    sha="$(curl -fsSL --max-time 5 \
+        "https://api.github.com/repos/$REPORTER_REPO/commits/$REPORTER_REF" \
+        2>/dev/null | jq -r '.sha // empty' 2>/dev/null || true)"
+
+    if [ -n "$sha" ]; then
+        mkdir -p "$REPORTER_SHA_CACHE_DIR"
+        printf '%s' "$sha" > "$cache_file"
+        printf '%s' "$sha"
+        return 0
+    fi
+
+    if [ -f "$cache_file" ]; then
+        cat "$cache_file"
+        return 0
+    fi
+
+    echo "Could not resolve $REPORTER_REPO @ $REPORTER_REF (check network)." >&2
+    echo "Set REPORTER_REF to a specific commit SHA to skip API resolution." >&2
+    return 1
+}
+
 compute_base_hash() {
-    local pkgs_sorted reporter_sh_sum reporter_svc_sum
+    local pkgs_sorted reporter_sha
     pkgs_sorted="$(printf '%s\n' "${BASE_PACKAGES[@]}" | LC_ALL=C sort | tr '\n' ' ')"
-    reporter_sh_sum="$(sha256sum "$ASSETS_DIR/claude-status-reporter.sh"      | awk '{print $1}')"
-    reporter_svc_sum="$(sha256sum "$ASSETS_DIR/claude-status-reporter.service" | awk '{print $1}')"
+    reporter_sha="$(resolve_reporter_sha)" || return 1
     {
-        printf 'schema=%s\n'       "$BASE_SCHEMA_VERSION"
-        printf 'image=%s\n'        "$SANDBOX_IMAGE"
-        printf 'pkgs=%s\n'         "$pkgs_sorted"
-        printf 'reporter_sh=%s\n'  "$reporter_sh_sum"
-        printf 'reporter_svc=%s\n' "$reporter_svc_sum"
+        printf 'schema=%s\n'      "$BASE_SCHEMA_VERSION"
+        printf 'image=%s\n'       "$SANDBOX_IMAGE"
+        printf 'pkgs=%s\n'        "$pkgs_sorted"
+        printf 'reporter=%s@%s\n' "$REPORTER_REPO" "$reporter_sha"
     } | sha256sum | cut -c1-12
 }
 
-BASE_HASH="$(compute_base_hash)"
+BASE_HASH="$(compute_base_hash)" || exit 1
 BASE_ALIAS="${BASE_ALIAS_PREFIX}${BASE_HASH}"
 BUILD_CONTAINER="csb-build-${BASE_HASH}"
 
@@ -240,17 +289,24 @@ build_base_image() {
     echo "alias yolo-claude='claude --dangerously-skip-permissions'" | \
         incus exec "$BUILD_CONTAINER" -- sudo -u ubuntu tee -a /home/ubuntu/.bashrc > /dev/null
 
-    echo "  Installing claude-status-reporter assets..."
-    incus file push "$ASSETS_DIR/claude-status-reporter.sh" \
-        "$BUILD_CONTAINER/usr/local/bin/claude-status-reporter.sh" --mode 0755
-    incus file push "$ASSETS_DIR/claude-status-reporter.service" \
-        "$BUILD_CONTAINER/etc/systemd/system/claude-status-reporter.service" --mode 0644
-
-    # Enable (but don't start) the service. The env file is per-instance
-    # and is pushed during cmd_create, before the container is started
-    # for real, so the unit's first activation already sees it.
-    incus exec "$BUILD_CONTAINER" -- systemctl daemon-reload
-    incus exec "$BUILD_CONTAINER" -- systemctl enable claude-status-reporter.service
+    # Fetch the status reporter from its own repo. The resolved SHA was
+    # baked into BASE_HASH already, so the cached base image is keyed off
+    # the exact content we're about to install. The container does the
+    # download itself: curl + tar are already present (BASE_PACKAGES and
+    # base Ubuntu respectively), and the bytes never have to land on the
+    # host.
+    local reporter_sha
+    reporter_sha="$(resolve_reporter_sha)" || exit 1
+    echo "  Fetching $REPORTER_REPO@${reporter_sha:0:12} and installing reporter..."
+    # shellcheck disable=SC2016 # script body runs inside the container
+    incus exec "$BUILD_CONTAINER" -- bash -c '
+        set -e
+        mkdir -p /tmp/claude-status-reporter
+        curl -fsSL "https://github.com/'"$REPORTER_REPO"'/archive/'"$reporter_sha"'.tar.gz" \
+            | tar xz -C /tmp/claude-status-reporter --strip-components=1
+        bash /tmp/claude-status-reporter/install.sh
+        rm -rf /tmp/claude-status-reporter
+    '
 
     # apt cache cleanup keeps the published image small.
     incus exec "$BUILD_CONTAINER" -- env DEBIAN_FRONTEND=noninteractive \
