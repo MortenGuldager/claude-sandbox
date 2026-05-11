@@ -21,9 +21,16 @@
 
 # --- Status reporter -------------------------------------------------------
 #
-# A small service inside the sandbox polls ~/.claude/sessions/*.json and
-# publishes a JSON payload via the chosen backend. Use it to drive a
-# status indicator (e.g. a desk traffic light) or a dashboard.
+# A small service inside the sandbox watches ~/.claude/sessions/*.json via
+# inotify and publishes a JSON payload whenever the aggregated status
+# changes, plus a keep-alive every REPORTER_KEEPALIVE seconds so a
+# subscriber that comes online late still learns the current state.
+#
+# Payload: {"sessions":{"<sessionId>":"<status>",...}}.
+# Keys are sorted for deterministic dedup. Consumers should key off
+# sessionId, not position, so multiple sandboxes can publish to the same
+# subscriber without colliding. Identifying info (developer, hostname) is
+# intentionally omitted — encode it in the MQTT topic / HTTP URL.
 #
 # Backends:
 #   none    Disable publishing entirely.
@@ -31,12 +38,13 @@
 #           `incus exec <container> journalctl -u claude-status-reporter`
 #           to inspect).
 #   file    Append each payload as one JSON line to REPORTER_FILE_PATH.
-#   mqtt    Publish via mosquitto_pub. Requires the mqtt backend at
-#           sandbox-create time (the installer adds mosquitto-clients).
+#   mqtt    Publish via mosquitto_pub with -r (retained). Requires the
+#           mqtt backend at sandbox-create time (the installer adds
+#           mosquitto-clients).
 #   http    POST each payload to REPORTER_HTTP_URL.
 
 #REPORTER_BACKEND="stdout"
-#REPORTER_INTERVAL=15
+#REPORTER_KEEPALIVE=60
 
 # --- file backend ----------------------------------------------------------
 #REPORTER_FILE_PATH="/var/log/claude-status.jsonl"

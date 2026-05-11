@@ -1,10 +1,17 @@
 #!/usr/bin/env bash
-# claude-status-reporter — periodically publishes the state of
-# ~/.claude/sessions/*.json via a configurable backend.
+# claude-status-reporter — publishes the status of ~/.claude/sessions/*.json
+# via a configurable backend.
 #
-# Settings are read from /etc/claude-status-reporter.env (or the path in
-# $REPORTER_CONFIG_FILE). The host-side `claude-sandbox create` writes
-# that file based on the user's ~/.config/claude-sandbox/config.
+# Driven by inotify on the sessions directory: a payload is sent on every
+# change, plus a keep-alive every REPORTER_KEEPALIVE seconds (default 60)
+# so a subscriber that comes online late still learns the current state.
+#
+# Payload: {"sessions":{"<sessionId>":"<status>", ...}}.
+# Keys are sorted for deterministic change detection. Consumers should key
+# off sessionId, not position — multiple sandboxes can publish to the same
+# subscriber without colliding.
+#
+# Settings come from /etc/claude-status-reporter.env (or $REPORTER_CONFIG_FILE).
 
 set -u
 
@@ -15,10 +22,10 @@ if [ -f "$CONFIG_FILE" ]; then
 fi
 
 REPORTER_BACKEND="${REPORTER_BACKEND:-stdout}"
-REPORTER_INTERVAL="${REPORTER_INTERVAL:-15}"
+REPORTER_KEEPALIVE="${REPORTER_KEEPALIVE:-60}"
 SESSIONS_DIR="${CLAUDE_SESSIONS_DIR:-$HOME/.claude/sessions}"
-DEVELOPER="${DEVELOPER_NAME:-unknown}"
-HOST_NAME="$(hostname)"
+
+mkdir -p "$SESSIONS_DIR"
 
 # --- Backends ---------------------------------------------------------------
 
@@ -54,7 +61,8 @@ publish_mqtt() {
         echo "reporter: REPORTER_MQTT_HOST and REPORTER_MQTT_TOPIC must be set" >&2
         return
     fi
-    local args=(-h "$host" -p "$port" -t "$topic" -m "$1" -q 0)
+    # -r: retained, so late subscribers get the last payload immediately.
+    local args=(-h "$host" -p "$port" -t "$topic" -m "$1" -q 0 -r)
     [ -n "$user" ] && args+=(-u "$user")
     [ -n "$pass" ] && args+=(-P "$pass")
     mosquitto_pub "${args[@]}" 2>/dev/null || true
@@ -71,26 +79,50 @@ publish() {
     esac
 }
 
+# --- Status computation -----------------------------------------------------
+
+compute_status() {
+    local sessions='{}'
+    shopt -s nullglob
+    local files=("$SESSIONS_DIR"/*.json)
+    shopt -u nullglob
+    if [ "${#files[@]}" -gt 0 ]; then
+        # -S sorts object keys so dedup compares are stable.
+        sessions="$(jq -sSc \
+            'map({(.sessionId // "unknown"): (.status // "unknown")}) | add // {}' \
+            "${files[@]}" 2>/dev/null || echo '{}')"
+    fi
+    printf '%s' "$sessions"
+}
+
+emit() {
+    local payload
+    payload="$(jq -nc --argjson s "$1" '{sessions:$s}')"
+    publish "$payload"
+}
+
 # --- Main loop --------------------------------------------------------------
 
+last=""
+current="$(compute_status)"
+emit "$current"
+last="$current"
+
 while true; do
-    sessions="[]"
-    if [ -d "$SESSIONS_DIR" ]; then
-        shopt -s nullglob
-        files=("$SESSIONS_DIR"/*.json)
-        shopt -u nullglob
-        if [ "${#files[@]}" -gt 0 ]; then
-            sessions="$(jq -s '.' "${files[@]}" 2>/dev/null || echo '[]')"
+    # inotifywait exits 0 on event, 2 on timeout. Watch the directory so we
+    # also catch creates/deletes of session files, not just modifications.
+    if inotifywait -qq -t "$REPORTER_KEEPALIVE" \
+            -e close_write,create,delete,move \
+            "$SESSIONS_DIR" 2>/dev/null; then
+        current="$(compute_status)"
+        if [ "$current" != "$last" ]; then
+            emit "$current"
+            last="$current"
         fi
+    else
+        # Keep-alive: re-publish current state with a fresh timestamp.
+        current="$(compute_status)"
+        emit "$current"
+        last="$current"
     fi
-
-    payload="$(jq -nc \
-        --arg dev      "$DEVELOPER" \
-        --arg host     "$HOST_NAME" \
-        --arg ts       "$(date -Iseconds)" \
-        --argjson sess "$sessions" \
-        '{developer:$dev, hostname:$host, timestamp:$ts, sessions:$sess}')"
-
-    publish "$payload"
-    sleep "$REPORTER_INTERVAL"
 done

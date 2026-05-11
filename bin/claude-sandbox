@@ -21,13 +21,13 @@ ASSETS_DIR="$(cd "$SCRIPT_DIR/../container" && pwd)"
 # Bumped manually when build logic changes in a way not captured by the
 # other hash inputs (e.g. we add a new step that doesn't affect any
 # tracked file). Forces a rebuild.
-BASE_SCHEMA_VERSION=2
+BASE_SCHEMA_VERSION=3
 
 # Packages installed into the base image. Order does not matter; the
 # hash sorts before digesting. `npm` is intentionally absent — it ships
 # bundled with NodeSource's `nodejs`, and Ubuntu's distro `npm` declares
 # Conflicts: nodejs against it.
-BASE_PACKAGES=(nodejs git curl jq mosquitto-clients)
+BASE_PACKAGES=(nodejs git curl jq mosquitto-clients inotify-tools)
 
 BASE_ALIAS_PREFIX="claude-sandbox-base-"
 BASE_AGE_WARN_DAYS=30
@@ -38,7 +38,7 @@ SANDBOX_IMAGE="images:ubuntu/24.04"
 SANDBOX_PROJECT_PATH="/home/ubuntu/project"
 
 REPORTER_BACKEND="stdout"
-REPORTER_INTERVAL=15
+REPORTER_KEEPALIVE=60
 REPORTER_FILE_PATH="/var/log/claude-status.jsonl"
 REPORTER_MQTT_HOST=""
 REPORTER_MQTT_PORT=1883
@@ -150,9 +150,8 @@ quote_env_value() {
 write_reporter_env_file() {
     local out="$1"
     {
-        printf '%s=%s\n' DEVELOPER_NAME    "$(quote_env_value "${USER:-unknown}")"
-        printf '%s=%s\n' REPORTER_BACKEND  "$(quote_env_value "$REPORTER_BACKEND")"
-        printf '%s=%s\n' REPORTER_INTERVAL "$(quote_env_value "$REPORTER_INTERVAL")"
+        printf '%s=%s\n' REPORTER_BACKEND   "$(quote_env_value "$REPORTER_BACKEND")"
+        printf '%s=%s\n' REPORTER_KEEPALIVE "$(quote_env_value "$REPORTER_KEEPALIVE")"
         case "$REPORTER_BACKEND" in
             file)
                 printf '%s=%s\n' REPORTER_FILE_PATH "$(quote_env_value "$REPORTER_FILE_PATH")"

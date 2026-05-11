@@ -158,19 +158,36 @@ settings and their defaults. Highlights:
 | `SANDBOX_IMAGE`          | `images:ubuntu/24.04`         | Any Incus-compatible image.                                          |
 | `SANDBOX_PROJECT_PATH`   | `/home/ubuntu/project`        | Where your project mounts inside the sandbox.                        |
 | `REPORTER_BACKEND`       | `stdout`                      | One of: `none`, `stdout`, `file`, `mqtt`, `http`.                    |
-| `REPORTER_INTERVAL`      | `15`                          | Seconds between status reports.                                      |
+| `REPORTER_KEEPALIVE`     | `60`                          | Seconds between keep-alive reports (changes are sent immediately).   |
 
 The auth token is read from the `CLAUDE_SANDBOX_AUTH` environment
 variable, not from the config file — see [Quickstart](#quickstart).
 
 ## Status reporter
 
-A systemd service inside the sandbox runs
-`claude-status-reporter.sh`, which every `REPORTER_INTERVAL` seconds:
+A systemd service inside the sandbox runs `claude-status-reporter.sh`,
+which watches `~/.claude/sessions/` via inotify and publishes a payload
+whenever the aggregated status changes. A keep-alive is also emitted
+every `REPORTER_KEEPALIVE` seconds (default 60) so a subscriber that
+was offline at boot still learns the current state.
 
-1. Reads `~/.claude/sessions/*.json`.
-2. Wraps it in `{developer, hostname, timestamp, sessions}`.
-3. Hands the payload to the configured backend.
+Payload:
+
+```json
+{
+  "sessions": {
+    "c632fc39-11d4-4d63-9dda-74d14706f07b": "busy",
+    "9c0dd5a5-1e3d-4af8-b4e5-d43975c9b38e": "idle"
+  }
+}
+```
+
+`sessions` is a map from `sessionId` to `status`, built from
+`~/.claude/sessions/*.json` (empty object when no sessions exist).
+Consumers should key off `sessionId`, not position — two sandboxes
+publishing to the same subscriber will not collide on slot 0.
+Identifying info (developer, hostname) is intentionally omitted —
+encode it in the MQTT topic / HTTP URL.
 
 ### Backends
 
@@ -178,8 +195,9 @@ A systemd service inside the sandbox runs
 - **`stdout`** *(default)* — writes to the journal:
   `incus exec <container> -- journalctl -u claude-status-reporter -f`.
 - **`file`** — appends one JSON line per report to `REPORTER_FILE_PATH`.
-- **`mqtt`** — publishes via `mosquitto_pub` (the installer adds
-  `mosquitto-clients` to the container when this backend is selected).
+- **`mqtt`** — publishes via `mosquitto_pub` with `-r` (retained), so
+  late subscribers immediately receive the last status. The installer
+  adds `mosquitto-clients` to the container.
 - **`http`** — POSTs `application/json` to `REPORTER_HTTP_URL`.
 
 ### Public MQTT brokers

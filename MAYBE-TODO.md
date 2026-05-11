@@ -9,27 +9,6 @@ Last updated: 2026-05-10
 
 ## Design questions (need usage experience)
 
-### What is the status data actually for?
-The reporter publishes `{developer, hostname, timestamp, sessions}`,
-but the consumer side is undecided. Initial idea was a desk traffic
-light (working / waiting / done). Until a real consumer exists, we
-don't know if the payload schema is right — fields like a coarse
-state enum (idle/working/awaiting-input/error) might be more useful
-than dumping the raw sessions array.
-
-**Revisit when:** the first consumer is built. Likely cue to redesign
-the payload.
-
-### Polling vs. hook-driven events
-Reporter polls `~/.claude/sessions/*.json` every 15s. Claude Code has
-stop/notification hooks that could push precise transitions
-(idle → working → done) instead. Hooks would be cleaner and lower
-latency, but require installing hook config into the sandbox during
-`create`.
-
-**Revisit when:** polling latency or load is annoying, or when we want
-sub-second indicator response.
-
 ### MQTT topic default
 Currently the topic must be explicitly set; an empty topic makes the
 backend log an error. Alternative: auto-generate a UUID on first
