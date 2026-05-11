@@ -5,9 +5,34 @@ that aren't implemented, decisions made for simplicity that may want
 revisiting, and small polish items. Not user-facing documentation —
 that lives in `README.md`.
 
-Last updated: 2026-05-10
+Last updated: 2026-05-11
 
 ## Design questions (need usage experience)
+
+### Reporter install requires root, but the reporter does not need it
+After extracting `claude-status-reporter` to its own repo, its
+`install.sh` still writes to `/usr/local/bin`, `/etc/systemd/system`,
+and runs `systemctl daemon-reload --enable`. All of that needs root.
+The reporter itself runs as user `ubuntu` and only reads
+`~/.claude/sessions/` — purely per-user state.
+
+A systemd *user* unit (`~/.config/systemd/user/...`,
+`systemctl --user enable`) would fit naturally and drop the root
+requirement entirely. Two phases:
+
+1. **In `claude-status-reporter`:** offer a user-mode install (either a
+   `--user` flag on `install.sh` or a separate `install-user.sh`) that
+   installs and enables as the current user. Keep system-wide install
+   for callers that genuinely want it.
+2. **In `claude-sandbox`:** switch `build_base_image` to invoke the
+   user-mode install, so the reporter no longer needs root inside the
+   build container. This is one step in the larger arc of stripping
+   privilege from the sandbox itself — see also the
+   `security.privileged=true` note below.
+
+**Revisit when:** doing the reporter side is the natural next step on
+the reporter repo; the sandbox change follows once the reporter
+supports user-mode install.
 
 ### MQTT topic default
 Currently the topic must be explicitly set; an empty topic makes the
@@ -38,6 +63,23 @@ missing 1 % is "I bumped one package".
 rebuilds become a real annoyance.
 
 ## Polish (small, do when convenient)
+
+### Agent-created files outside the project mount are invisible from the host
+The sandbox deliberately mounts only the project directory; anything
+created elsewhere inside the container (e.g. a sibling project) lives
+only inside the container and has to be `incus exec`-extracted by hand.
+Surfaced 2026-05-11 when claude-status-reporter was first scaffolded
+as a sibling directory inside the sandbox — technically the right place
+to put it, but invisible from outside until manually copied out.
+
+Options if this becomes a recurring pain:
+- Document the limitation prominently so agent prompts default to
+  creating sibling projects inside the mount.
+- Add a `claude-sandbox export <container-path> <host-path>` command
+  for explicit one-shot transfer.
+- Optional second mount for a host-side scratch area.
+
+**Revisit when:** the same manual extraction is needed a second time.
 
 ### End-to-end verification
 `create` and `shell` were exercised on a real Incus host during the
