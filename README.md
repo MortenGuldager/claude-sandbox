@@ -73,6 +73,10 @@ claude-sandbox shell         # drop into the sandbox as user `ubuntu`
 claude-sandbox destroy       # nuke the container
 ```
 
+Commands chain — `claude-sandbox destroy create map=ttyACM0 shell`
+tears the container down and brings a fresh one up in one go. The
+chain aborts on the first failure.
+
 `CLAUDE_SANDBOX_AUTH` is forwarded into the sandbox as
 `ANTHROPIC_AUTH_TOKEN` (the variable Claude Code looks for). It is
 deliberately *not* called `ANTHROPIC_AUTH_TOKEN` on the host: a host

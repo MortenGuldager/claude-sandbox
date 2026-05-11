@@ -91,23 +91,28 @@ Container: $CONTAINER_NAME
 Base:      local:$BASE_ALIAS
 Config:    $CONFIG_FILE $( [ -f "$CONFIG_FILE" ] || echo '(not present; using defaults)' )
 
-Usage: $(basename "$0") <command> [args]
+Usage: $(basename "$0") <command>[=<arg>] [<command>[=<arg>]...]
+
+Commands run in the given order. The chain aborts on the first failure.
+
+Examples:
+  $(basename "$0") create shell
+  $(basename "$0") destroy create map=ttyACM0 shell
+  $(basename "$0") create map shell           # map defaults to ttyACM0
 
 Commands:
   create               Launch and provision the sandbox container.
                        Builds the base image first if it is missing.
-  map [serial_port]    Pass a USB/serial device into the sandbox
-                       (default: ttyACM0).
+  map[=<serial_port>]  Pass a USB/serial device into the sandbox
+                       (default port: ttyACM0).
   shell                Open a login shell inside the sandbox.
   info                 Show sandbox status and mounted devices.
-  destroy              Delete the sandbox container.
+  destroy              Delete the sandbox container (no-op if absent).
   bases                List cached base images with age and status.
   rebuild-base         Force a rebuild of the current base image.
   gc                   Delete cached base images that don't match the
                        current hash.
   help                 Show this help.
-
-Typical flow: create -> [map ttyACM0] -> shell -> destroy
 EOF
 }
 
@@ -376,7 +381,7 @@ cmd_info() {
     echo "  Reporter:  $REPORTER_BACKEND"
     echo "  Built on:  ${base_hash:-<unknown>} (current: $BASE_HASH)"
     if [ -n "$base_hash" ] && [ "$base_hash" != "$BASE_HASH" ]; then
-        echo "             (sandbox predates current base; recreate to update)"
+        echo "             (sandbox predates current base; run 'destroy create' to update)"
     fi
     echo
     echo "Devices:"
@@ -385,6 +390,10 @@ cmd_info() {
 }
 
 cmd_destroy() {
+    if ! container_exists "$CONTAINER_NAME"; then
+        echo "No sandbox to delete."
+        return 0
+    fi
     incus delete -f "$CONTAINER_NAME"
     echo "Sandbox deleted."
 }
@@ -486,16 +495,56 @@ cmd_gc() {
 }
 
 # --- Dispatch ---------------------------------------------------------------
+#
+# Tokens are <cmd> or <cmd>=<arg>. Validate the whole chain before running
+# anything so a typo can't take the sandbox down halfway through.
 
-case "${1:-help}" in
-    create)         shift; cmd_create        "$@" ;;
-    map)            shift; cmd_map           "$@" ;;
-    shell)          shift; cmd_shell         "$@" ;;
-    info)           shift; cmd_info          "$@" ;;
-    destroy)        shift; cmd_destroy       "$@" ;;
-    bases)          shift; cmd_bases         "$@" ;;
-    rebuild-base)   shift; cmd_rebuild_base  "$@" ;;
-    gc)             shift; cmd_gc            "$@" ;;
-    help|-h|--help) show_help ;;
-    *)              show_help; exit 1 ;;
-esac
+if [ $# -eq 0 ]; then
+    show_help
+    exit 0
+fi
+
+split_token() {
+    TOKEN_CMD="${1%%=*}"
+    if [[ "$1" == *=* ]]; then
+        TOKEN_ARG="${1#*=}"
+        TOKEN_HAS_ARG=1
+    else
+        TOKEN_ARG=""
+        TOKEN_HAS_ARG=0
+    fi
+}
+
+for token in "$@"; do
+    split_token "$token"
+    case "$TOKEN_CMD" in
+        create|shell|info|destroy|bases|rebuild-base|gc|help|-h|--help)
+            if [ "$TOKEN_HAS_ARG" -eq 1 ]; then
+                echo "Command '$TOKEN_CMD' takes no argument; got '$token'" >&2
+                exit 1
+            fi
+            ;;
+        map)
+            ;;
+        *)
+            echo "Unknown command: '$TOKEN_CMD'" >&2
+            echo "Run '$(basename "$0") help' for the list." >&2
+            exit 1
+            ;;
+    esac
+done
+
+for token in "$@"; do
+    split_token "$token"
+    case "$TOKEN_CMD" in
+        create)         cmd_create ;;
+        map)            cmd_map "$TOKEN_ARG" ;;
+        shell)          cmd_shell ;;
+        info)           cmd_info ;;
+        destroy)        cmd_destroy ;;
+        bases)          cmd_bases ;;
+        rebuild-base)   cmd_rebuild_base ;;
+        gc)             cmd_gc ;;
+        help|-h|--help) show_help ;;
+    esac
+done
