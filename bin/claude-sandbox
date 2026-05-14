@@ -152,6 +152,10 @@ Examples:
 Commands:
   create               Launch and provision the sandbox container.
                        Builds the base image first if it is missing.
+                       Reads the auth token from \$CLAUDE_SANDBOX_AUTH
+                       or \$CLAUDE_CONFIG_DIR/sandbox-auth.
+  auth                 Re-read the auth token (same sources as create)
+                       and write it into an existing sandbox.
   map[=<serial_port>]  Pass a USB/serial device into the sandbox
                        (default port: ttyACM0).
   shell                Open a login shell inside the sandbox.
@@ -199,6 +203,43 @@ quote_env_value() {
     s="${s//\$/\\\$}"
     s="${s//\`/\\\`}"
     printf '"%s"' "$s"
+}
+
+# Resolves the Anthropic auth token to forward into the sandbox.
+# Precedence:
+#   1. $CLAUDE_SANDBOX_AUTH         — explicit per-invocation override
+#   2. $CLAUDE_CONFIG_DIR/sandbox-auth — per-account file on host, so the
+#      same aliases you use to pick a host-side claude account (e.g.
+#      `CLAUDE_CONFIG_DIR=~/.claude-mogul`) also pick the sandbox's
+#      token without a per-create flag.
+# On success, sets RESOLVED_AUTH_TOKEN and RESOLVED_AUTH_SOURCE.
+resolve_auth_token() {
+    RESOLVED_AUTH_TOKEN=""
+    RESOLVED_AUTH_SOURCE=""
+    if [ -n "${CLAUDE_SANDBOX_AUTH-}" ]; then
+        RESOLVED_AUTH_TOKEN="$CLAUDE_SANDBOX_AUTH"
+        RESOLVED_AUTH_SOURCE='$CLAUDE_SANDBOX_AUTH'
+        return 0
+    fi
+    if [ -n "${CLAUDE_CONFIG_DIR-}" ] && [ -f "$CLAUDE_CONFIG_DIR/sandbox-auth" ]; then
+        local t
+        t="$(tr -d '[:space:]' < "$CLAUDE_CONFIG_DIR/sandbox-auth")"
+        if [ -n "$t" ]; then
+            RESOLVED_AUTH_TOKEN="$t"
+            RESOLVED_AUTH_SOURCE="$CLAUDE_CONFIG_DIR/sandbox-auth"
+            return 0
+        fi
+    fi
+    return 1
+}
+
+# Writes RESOLVED_AUTH_TOKEN into the container's ~/.bashrc, replacing
+# any prior export so `auth` is idempotent and doesn't accumulate lines.
+write_auth_token_to_container() {
+    incus exec "$CONTAINER_NAME" -- sudo -u ubuntu \
+        sed -i '/^export ANTHROPIC_AUTH_TOKEN=/d' /home/ubuntu/.bashrc
+    printf "export ANTHROPIC_AUTH_TOKEN=%q\n" "$RESOLVED_AUTH_TOKEN" | \
+        incus exec "$CONTAINER_NAME" -- sudo -u ubuntu tee -a /home/ubuntu/.bashrc > /dev/null
 }
 
 write_reporter_env_file() {
@@ -367,16 +408,28 @@ cmd_create() {
     echo "Starting sandbox..."
     incus start "$CONTAINER_NAME"
 
-    if [ -n "${CLAUDE_SANDBOX_AUTH-}" ]; then
-        printf "export ANTHROPIC_AUTH_TOKEN=%q\n" "$CLAUDE_SANDBOX_AUTH" | \
-            incus exec "$CONTAINER_NAME" -- sudo -u ubuntu tee -a /home/ubuntu/.bashrc > /dev/null
+    if resolve_auth_token; then
+        echo "Forwarding auth token from $RESOLVED_AUTH_SOURCE..."
+        write_auth_token_to_container
     else
-        echo "Note: \$CLAUDE_SANDBOX_AUTH is not set on the host; skipping token forwarding." >&2
-        echo "      To forward an auth token next time, run:" >&2
-        echo "        CLAUDE_SANDBOX_AUTH=<token> $(basename "$0") create" >&2
+        echo "Note: no auth token found; skipping token forwarding." >&2
+        echo "      Set \$CLAUDE_SANDBOX_AUTH or put a token in" >&2
+        echo "      \$CLAUDE_CONFIG_DIR/sandbox-auth, then run '$(basename "$0") auth'." >&2
     fi
 
     echo "Sandbox is ready."
+}
+
+cmd_auth() {
+    require_container
+    if ! resolve_auth_token; then
+        echo "No auth token available." >&2
+        echo "Set \$CLAUDE_SANDBOX_AUTH or put a token in \$CLAUDE_CONFIG_DIR/sandbox-auth." >&2
+        exit 1
+    fi
+    echo "Updating auth token from $RESOLVED_AUTH_SOURCE..."
+    write_auth_token_to_container
+    echo "Token updated. New shells will pick it up."
 }
 
 cmd_map() {
@@ -574,7 +627,7 @@ split_token() {
 for token in "$@"; do
     split_token "$token"
     case "$TOKEN_CMD" in
-        create|shell|info|destroy|bases|rebuild-base|gc|help|-h|--help)
+        create|auth|shell|info|destroy|bases|rebuild-base|gc|help|-h|--help)
             if [ "$TOKEN_HAS_ARG" -eq 1 ]; then
                 echo "Command '$TOKEN_CMD' takes no argument; got '$token'" >&2
                 exit 1
@@ -594,6 +647,7 @@ for token in "$@"; do
     split_token "$token"
     case "$TOKEN_CMD" in
         create)         cmd_create ;;
+        auth)           cmd_auth ;;
         map)            cmd_map "$TOKEN_ARG" ;;
         shell)          cmd_shell ;;
         info)           cmd_info ;;
