@@ -127,6 +127,16 @@ New shells inside the sandbox pick up the change; `auth` is not
 implicit in `shell` to avoid silently rewriting credentials based on
 whichever alias you happened to type.
 
+### Git identity
+
+`create` also copies your host's global `user.name`/`user.email`
+(`git config --global ...`) into `~/.gitconfig` inside the sandbox so
+agent-made commits land under your identity. Host-global on purpose:
+you're the same person regardless of which Claude account a sandbox
+runs under. A repo-local `.git/config` in the mounted project still
+wins, via git's normal precedence. SSH keys and push credentials are
+*not* forwarded — pushing remains a host-side action.
+
 The container name is derived from your project path, so multiple
 checkouts of the same repo each get their own sandbox.
 

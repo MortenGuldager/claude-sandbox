@@ -153,7 +153,8 @@ Commands:
   create               Launch and provision the sandbox container.
                        Builds the base image first if it is missing.
                        Reads the auth token from \$CLAUDE_SANDBOX_AUTH
-                       or \$CLAUDE_CONFIG_DIR/sandbox-auth.
+                       or \$CLAUDE_CONFIG_DIR/sandbox-auth, and forwards
+                       the host's global git user.name/email.
   auth                 Re-read the auth token (same sources as create)
                        and write it into an existing sandbox.
   map[=<serial_port>]  Pass a USB/serial device into the sandbox
@@ -240,6 +241,24 @@ write_auth_token_to_container() {
         sed -i '/^export ANTHROPIC_AUTH_TOKEN=/d' /home/ubuntu/.bashrc
     printf "export ANTHROPIC_AUTH_TOKEN=%q\n" "$RESOLVED_AUTH_TOKEN" | \
         incus exec "$CONTAINER_NAME" -- sudo -u ubuntu tee -a /home/ubuntu/.bashrc > /dev/null
+}
+
+# Resolves the host's global git identity for forwarding. We use
+# host-global on purpose: you're the same person regardless of which
+# Claude account a given sandbox uses, so identity doesn't belong with
+# the per-account auth token. A repo-local .git/config inside the
+# mounted project still wins over this (git's normal precedence).
+resolve_git_identity() {
+    RESOLVED_GIT_NAME="$(git config --global user.name 2>/dev/null || true)"
+    RESOLVED_GIT_EMAIL="$(git config --global user.email 2>/dev/null || true)"
+    [ -n "$RESOLVED_GIT_NAME" ] && [ -n "$RESOLVED_GIT_EMAIL" ]
+}
+
+write_git_identity_to_container() {
+    printf '[user]\n\tname = %s\n\temail = %s\n' \
+        "$RESOLVED_GIT_NAME" "$RESOLVED_GIT_EMAIL" | \
+        incus exec "$CONTAINER_NAME" -- sudo -u ubuntu \
+        tee /home/ubuntu/.gitconfig > /dev/null
 }
 
 write_reporter_env_file() {
@@ -415,6 +434,15 @@ cmd_create() {
         echo "Note: no auth token found; skipping token forwarding." >&2
         echo "      Set \$CLAUDE_SANDBOX_AUTH or put a token in" >&2
         echo "      \$CLAUDE_CONFIG_DIR/sandbox-auth, then run '$(basename "$0") auth'." >&2
+    fi
+
+    if resolve_git_identity; then
+        echo "Forwarding git identity: $RESOLVED_GIT_NAME <$RESOLVED_GIT_EMAIL>"
+        write_git_identity_to_container
+    else
+        echo "Note: host has no global git user.name/user.email; commits in the sandbox" >&2
+        echo "      will fail until you set them (on host: 'git config --global ...'" >&2
+        echo "      then 'destroy create' to refresh the sandbox)." >&2
     fi
 
     echo "Sandbox is ready."
