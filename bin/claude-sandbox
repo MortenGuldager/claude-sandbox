@@ -499,7 +499,13 @@ cmd_map() {
 cmd_shell() {
     require_container
     echo "Opening shell in $CONTAINER_NAME..."
-    incus exec "$CONTAINER_NAME" -- sudo --login --user ubuntu
+    # Land in the mounted project dir, not $HOME. Sandboxes are
+    # project-scoped, and the prompt still shows the cwd so there's
+    # no surprise. Fall back to $HOME if the mount is missing.
+    local path
+    path="$(printf '%q' "$SANDBOX_PROJECT_PATH")"
+    incus exec "$CONTAINER_NAME" -- sudo --login --user ubuntu \
+        bash -c "cd $path 2>/dev/null || cd ~; exec bash -i"
 }
 
 cmd_info() {
