@@ -147,7 +147,8 @@ Commands run in the given order. The chain aborts on the first failure.
 Examples:
   $(basename "$0") create shell
   $(basename "$0") destroy create map=ttyACM0 shell
-  $(basename "$0") create map shell           # map defaults to ttyACM0
+  $(basename "$0") create map=ttyUSB0,ttyACM0 shell  # multiple ports
+  $(basename "$0") create map shell                  # map defaults to ttyACM0
 
 Commands:
   create               Launch and provision the sandbox container.
@@ -157,8 +158,11 @@ Commands:
                        the host's global git user.name/email.
   auth                 Re-read the auth token (same sources as create)
                        and write it into an existing sandbox.
-  map[=<serial_port>]  Pass a USB/serial device into the sandbox
-                       (default port: ttyACM0).
+  map[=<port>[,<port>...]]
+                       Pass one or more USB/serial devices into the
+                       sandbox (default port: ttyACM0). Additive:
+                       later map calls add to, rather than replace,
+                       previously mapped ports.
   shell                Open a login shell inside the sandbox.
   info                 Show sandbox status and mounted devices.
   destroy              Delete the sandbox container (no-op if absent).
@@ -462,38 +466,69 @@ cmd_auth() {
 
 cmd_map() {
     require_container
-    local port_name="${1:-ttyACM0}"
-    local port_path="/dev/$port_name"
+    local arg="${1:-ttyACM0}"
 
-    if [ ! -e "$port_path" ]; then
-        echo "Device $port_path not found on host." >&2
+    # Comma-separated list so `map=ttyUSB0,ttyACM0` adds both in one
+    # call. Each port gets its own Incus device names so subsequent
+    # `map=<port>` calls are additive — remapping one port does not
+    # disturb others already passed through.
+    local -a names=() vids=() pids=() paths=()
+    local raw port_name port_path ids vid pid
+    local old_ifs="$IFS"
+    IFS=','
+    for raw in $arg; do
+        port_name="${raw// /}"
+        [ -z "$port_name" ] && continue
+        port_path="/dev/$port_name"
+        if [ ! -e "$port_path" ]; then
+            IFS="$old_ifs"
+            echo "Device $port_path not found on host." >&2
+            exit 1
+        fi
+        ids="$(get_usb_ids "$port_name" || true)"
+        if [ -z "$ids" ] || [ "$ids" = ":" ]; then
+            IFS="$old_ifs"
+            echo "Could not determine USB IDs for $port_path." >&2
+            exit 1
+        fi
+        vid="${ids%:*}"
+        pid="${ids#*:}"
+        echo "Identified hardware: $port_path vendor=$vid product=$pid"
+        names+=("$port_name")
+        vids+=("$vid")
+        pids+=("$pid")
+        paths+=("$port_path")
+    done
+    IFS="$old_ifs"
+
+    if [ "${#names[@]}" -eq 0 ]; then
+        echo "No ports given." >&2
         exit 1
     fi
 
-    local ids vid pid
-    ids="$(get_usb_ids "$port_name" || true)"
-    if [ -z "$ids" ] || [ "$ids" = ":" ]; then
-        echo "Could not determine USB IDs for $port_path." >&2
-        exit 1
-    fi
-    vid="${ids%:*}"
-    pid="${ids#*:}"
+    local i usb_dev serial_dev
+    for i in "${!names[@]}"; do
+        port_name="${names[$i]}"
+        port_path="${paths[$i]}"
+        vid="${vids[$i]}"
+        pid="${pids[$i]}"
+        usb_dev="claude-usb-$port_name"
+        serial_dev="serial-dev-$port_name"
 
-    echo "Identified hardware: vendor=$vid, product=$pid"
+        incus config device remove "$CONTAINER_NAME" "$usb_dev"    2>/dev/null || true
+        incus config device remove "$CONTAINER_NAME" "$serial_dev" 2>/dev/null || true
 
-    incus config device remove "$CONTAINER_NAME" claude-usb 2>/dev/null || true
-    incus config device remove "$CONTAINER_NAME" serial-dev 2>/dev/null || true
+        incus config device add "$CONTAINER_NAME" "$usb_dev" usb \
+            vendorid="$vid" \
+            productid="$pid"
 
-    incus config device add "$CONTAINER_NAME" claude-usb usb \
-        vendorid="$vid" \
-        productid="$pid"
+        incus config device add "$CONTAINER_NAME" "$serial_dev" unix-char \
+            source="$port_path" \
+            path="$port_path" \
+            mode=0666
 
-    incus config device add "$CONTAINER_NAME" serial-dev unix-char \
-        source="$port_path" \
-        path="$port_path" \
-        mode=0666
-
-    echo "Device mapped: $port_path"
+        echo "Device mapped: $port_path"
+    done
 }
 
 cmd_shell() {
