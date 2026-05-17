@@ -147,15 +147,18 @@ Commands run in the given order. The chain aborts on the first failure.
 Examples:
   $(basename "$0") create shell
   $(basename "$0") destroy create map=ttyACM0 shell
-  $(basename "$0") create map=ttyUSB0,ttyACM0 shell  # multiple ports
+  $(basename "$0") create map=ttyUSB0,ttyACM0 shell  # multiple devices
   $(basename "$0") create map shell                  # map defaults to ttyACM0
+  $(basename "$0") create expose=5173 shell          # forward a dev-server port
 
 Commands:
   create               Launch and provision the sandbox container.
                        Builds the base image first if it is missing.
                        Reads the auth token from \$CLAUDE_SANDBOX_AUTH
-                       or \$CLAUDE_CONFIG_DIR/sandbox-auth, and forwards
-                       the host's global git user.name/email.
+                       or \$CLAUDE_CONFIG_DIR/sandbox-auth, forwards
+                       the host's global git user.name/email and the
+                       host's timezone, and writes runtime notes to
+                       ~/.claude/CLAUDE.md inside the sandbox.
   auth                 Re-read the auth token (same sources as create)
                        and write it into an existing sandbox.
   map[=<port>[,<port>...]]
@@ -163,6 +166,13 @@ Commands:
                        sandbox (default port: ttyACM0). Additive:
                        later map calls add to, rather than replace,
                        previously mapped ports.
+  expose=<host>[:<container>][,...]
+                       Forward a TCP port from the host's loopback into
+                       the container's loopback. \`expose=5173\` maps
+                       host 127.0.0.1:5173 -> container 127.0.0.1:5173;
+                       \`expose=5173:80\` maps different ports. Additive
+                       across calls; re-exposing a host port replaces
+                       the existing forward.
   shell                Open a login shell inside the sandbox.
   info                 Show sandbox status and mounted devices.
   destroy              Delete the sandbox container (no-op if absent).
@@ -263,6 +273,110 @@ write_git_identity_to_container() {
         "$RESOLVED_GIT_NAME" "$RESOLVED_GIT_EMAIL" | \
         incus exec "$CONTAINER_NAME" -- sudo -u ubuntu \
         tee /home/ubuntu/.gitconfig > /dev/null
+}
+
+# Resolves the host's timezone for forwarding into the sandbox. We try
+# three sources in order: timedatectl (systemd-style), /etc/timezone
+# (debian-style), then the symlink target of /etc/localtime. One of
+# these is present on every reasonable host.
+resolve_host_timezone() {
+    RESOLVED_TZ=""
+    if command -v timedatectl >/dev/null 2>&1; then
+        RESOLVED_TZ="$(timedatectl show -p Timezone --value 2>/dev/null || true)"
+    fi
+    if [ -z "$RESOLVED_TZ" ] && [ -f /etc/timezone ]; then
+        RESOLVED_TZ="$(tr -d '[:space:]' < /etc/timezone)"
+    fi
+    if [ -z "$RESOLVED_TZ" ] && [ -L /etc/localtime ]; then
+        local link
+        link="$(readlink -f /etc/localtime 2>/dev/null || true)"
+        case "$link" in
+            */zoneinfo/*) RESOLVED_TZ="${link#*/zoneinfo/}" ;;
+        esac
+    fi
+    [ -n "$RESOLVED_TZ" ]
+}
+
+write_timezone_to_container() {
+    if ! incus exec "$CONTAINER_NAME" -- \
+        test -e "/usr/share/zoneinfo/$RESOLVED_TZ"; then
+        echo "Note: container has no zoneinfo entry for '$RESOLVED_TZ'; leaving clock at UTC." >&2
+        return 1
+    fi
+    incus exec "$CONTAINER_NAME" -- \
+        ln -sf "/usr/share/zoneinfo/$RESOLVED_TZ" /etc/localtime
+    printf '%s\n' "$RESOLVED_TZ" | \
+        incus exec "$CONTAINER_NAME" -- tee /etc/timezone > /dev/null
+}
+
+# Paths inside the sandbox where we keep environment notes for Claude.
+# The top-level CLAUDE.md is a tiny stub that points at CLAUDE.d/; the
+# per-aspect files (00-sandbox.md, device-<port>.md, port-<n>.md) are
+# written as the sandbox grows new mappings, so a new aspect just drops
+# a new file rather than rewriting one big document.
+SANDBOX_CLAUDE_MD="/home/ubuntu/.claude/CLAUDE.md"
+SANDBOX_CLAUDE_D="/home/ubuntu/.claude/CLAUDE.d"
+
+# Reads content from stdin and writes it into the sandbox as user ubuntu,
+# creating parent directories as needed. Used for the CLAUDE.md stub and
+# every CLAUDE.d/ file.
+write_sandbox_user_file() {
+    local path="$1" dir
+    dir="$(dirname "$path")"
+    # </dev/null on mkdir so the caller's stdin (heredoc / pipe) is
+    # untouched and reaches the tee below intact.
+    incus exec "$CONTAINER_NAME" -- sudo -u ubuntu mkdir -p "$dir" </dev/null
+    incus exec "$CONTAINER_NAME" -- sudo -u ubuntu tee "$path" > /dev/null
+}
+
+write_sandbox_claude_md_stub() {
+    write_sandbox_user_file "$SANDBOX_CLAUDE_MD" <<EOF
+# Sandbox runtime environment
+
+You are running inside a \`claude-sandbox\` Incus container, not on the
+host. Runtime details specific to how this sandbox was launched —
+mounted project path, forwarded USB devices, forwarded network ports —
+live as individual files in \`$SANDBOX_CLAUDE_D/\`. Read every file
+there at the start of the session, and re-read it if you suspect the
+environment has changed.
+EOF
+}
+
+write_sandbox_environment_doc() {
+    {
+        echo "# Sandbox"
+        echo
+        echo "- Container name: \`$CONTAINER_NAME\` (Incus, on the host)."
+        echo "- Host project directory is mounted read-write at \`$SANDBOX_PROJECT_PATH\`. Changes there persist on the host; everything outside that path lives only inside the container and disappears on \`destroy\`."
+        echo "- No SSH keys, GPG keys, or cloud credentials from the host are forwarded. Pushing to remotes is a host-side action — ask the user to run it."
+        if [ -n "${RESOLVED_TZ-}" ]; then
+            echo "- Container clock is set to **$RESOLVED_TZ**, matching the host."
+        fi
+    } | write_sandbox_user_file "$SANDBOX_CLAUDE_D/00-sandbox.md"
+}
+
+write_device_doc() {
+    local port_name="$1" port_path="$2" vid="$3" pid="$4"
+    {
+        echo "# USB/serial device: \`$port_path\`"
+        echo
+        echo "- Passed through from the host."
+        echo "- Vendor ID: \`$vid\`  Product ID: \`$pid\`"
+        echo "- Accessible at \`$port_path\` inside the sandbox (mode 0666 — no sudo needed)."
+    } | write_sandbox_user_file "$SANDBOX_CLAUDE_D/device-$port_name.md"
+}
+
+write_port_doc() {
+    local host_port="$1" container_port="$2"
+    {
+        echo "# Forwarded network port: $host_port"
+        echo
+        if [ "$host_port" = "$container_port" ]; then
+            echo "Host \`127.0.0.1:$host_port\` is proxied to the same port inside the container. Bind your service to \`0.0.0.0:$container_port\` (or \`127.0.0.1:$container_port\`) and it is reachable on the host at <http://localhost:$host_port>."
+        else
+            echo "Host \`127.0.0.1:$host_port\` is proxied to container \`127.0.0.1:$container_port\`. Bind your service to \`0.0.0.0:$container_port\` (or \`127.0.0.1:$container_port\`) inside the sandbox and it is reachable on the host at <http://localhost:$host_port>."
+        fi
+    } | write_sandbox_user_file "$SANDBOX_CLAUDE_D/port-$host_port.md"
 }
 
 write_reporter_env_file() {
@@ -449,6 +563,20 @@ cmd_create() {
         echo "      then 'destroy create' to refresh the sandbox)." >&2
     fi
 
+    # Timezone is resolved before the environment doc so the doc can
+    # report the resolved value. On failure $RESOLVED_TZ stays empty and
+    # the doc just omits the line.
+    if resolve_host_timezone; then
+        echo "Setting container timezone to $RESOLVED_TZ..."
+        write_timezone_to_container || true
+    else
+        echo "Note: could not resolve host timezone; container clock stays at UTC." >&2
+    fi
+
+    echo "Writing sandbox environment notes to $SANDBOX_CLAUDE_MD..."
+    write_sandbox_claude_md_stub
+    write_sandbox_environment_doc
+
     echo "Sandbox is ready."
 }
 
@@ -527,7 +655,65 @@ cmd_map() {
             path="$port_path" \
             mode=0666
 
+        write_device_doc "$port_name" "$port_path" "$vid" "$pid"
         echo "Device mapped: $port_path"
+    done
+}
+
+# Forwards a TCP port from the host's loopback into the container's
+# loopback via an Incus proxy device. Loopback-only on purpose:
+# exposing a dev server beyond localhost is rarely what you want, and
+# you can always edit the Incus device by hand for the rare case.
+# Format: `expose=HOST[:CONTAINER][,...]`. When CONTAINER is omitted,
+# the same port number is used on both sides. Additive across calls,
+# and re-exposing the same host port replaces the existing forward.
+cmd_expose() {
+    require_container
+    local arg="$1"
+
+    local -a host_ports=() container_ports=()
+    local raw host_port container_port
+    local old_ifs="$IFS"
+    IFS=','
+    for raw in $arg; do
+        raw="${raw// /}"
+        [ -z "$raw" ] && continue
+        if [[ "$raw" == *:* ]]; then
+            host_port="${raw%%:*}"
+            container_port="${raw##*:}"
+        else
+            host_port="$raw"
+            container_port="$raw"
+        fi
+        if ! [[ "$host_port" =~ ^[0-9]+$ ]] || ! [[ "$container_port" =~ ^[0-9]+$ ]]; then
+            IFS="$old_ifs"
+            echo "Invalid port spec '$raw' (expected NUM or NUM:NUM)." >&2
+            exit 1
+        fi
+        host_ports+=("$host_port")
+        container_ports+=("$container_port")
+    done
+    IFS="$old_ifs"
+
+    if [ "${#host_ports[@]}" -eq 0 ]; then
+        echo "No ports given." >&2
+        exit 1
+    fi
+
+    local i dev_name
+    for i in "${!host_ports[@]}"; do
+        host_port="${host_ports[$i]}"
+        container_port="${container_ports[$i]}"
+        dev_name="claude-port-$host_port"
+
+        incus config device remove "$CONTAINER_NAME" "$dev_name" 2>/dev/null || true
+
+        incus config device add "$CONTAINER_NAME" "$dev_name" proxy \
+            listen="tcp:127.0.0.1:$host_port" \
+            connect="tcp:127.0.0.1:$container_port" >/dev/null
+
+        write_port_doc "$host_port" "$container_port"
+        echo "Port forwarded: host 127.0.0.1:$host_port -> container 127.0.0.1:$container_port"
     done
 }
 
@@ -704,6 +890,12 @@ for token in "$@"; do
             ;;
         map)
             ;;
+        expose)
+            if [ "$TOKEN_HAS_ARG" -ne 1 ] || [ -z "$TOKEN_ARG" ]; then
+                echo "Command 'expose' requires an argument, e.g. expose=5173 or expose=5173:80" >&2
+                exit 1
+            fi
+            ;;
         *)
             echo "Unknown command: '$TOKEN_CMD'" >&2
             echo "Run '$(basename "$0") help' for the list." >&2
@@ -718,6 +910,7 @@ for token in "$@"; do
         create)         cmd_create ;;
         auth)           cmd_auth ;;
         map)            cmd_map "$TOKEN_ARG" ;;
+        expose)         cmd_expose "$TOKEN_ARG" ;;
         shell)          cmd_shell ;;
         info)           cmd_info ;;
         destroy)        cmd_destroy ;;

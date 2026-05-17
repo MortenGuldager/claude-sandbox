@@ -75,6 +75,7 @@ CLAUDE_SANDBOX_AUTH=sk-... \
     claude-sandbox create    # launches a container, mounts the project,
                              # installs Claude Code, starts the reporter
 claude-sandbox map ttyACM0   # (optional) pass a USB serial device through
+claude-sandbox expose 5173   # (optional) forward host 127.0.0.1:5173 -> container
 claude-sandbox shell         # drop into the sandbox as user `ubuntu`
 # ... work ...
 claude-sandbox destroy       # nuke the container
@@ -139,6 +140,45 @@ wins, via git's normal precedence. SSH keys and push credentials are
 
 The container name is derived from your project path, so multiple
 checkouts of the same repo each get their own sandbox.
+
+### Timezone
+
+`create` resolves the host's timezone (`timedatectl` → `/etc/timezone`
+→ `readlink /etc/localtime`) and applies it inside the container so
+the shell, log timestamps, and Claude's sense of "now" match the
+host. The base image ships UTC, so without this step everything in
+the sandbox is offset from your wall clock.
+
+### Forwarding network ports
+
+`expose=<host>[:<container>][,...]` adds an Incus proxy device that
+forwards a TCP port from the host's loopback into the container's
+loopback. Typical use is reaching a dev server running inside the
+sandbox from a host browser:
+
+```sh
+claude-sandbox expose=5173               # host 127.0.0.1:5173 -> container 127.0.0.1:5173
+claude-sandbox expose=5173:80,8025:8025  # multiple, with port translation
+```
+
+Loopback-only on purpose — exposing a dev server beyond `localhost`
+is rarely what you want, and the rare case is one `incus config
+device add` away.
+
+### Telling Claude about its environment
+
+`create` writes a small `~/.claude/CLAUDE.md` inside the sandbox that
+points Claude at `~/.claude/CLAUDE.d/`. Each runtime fact that
+depends on how the sandbox was launched lands as its own file there:
+
+- `00-sandbox.md` — container name, mounted project path, timezone.
+- `device-<port>.md` — one per `map`-ed USB/serial device, with
+  vendor/product IDs.
+- `port-<n>.md` — one per `expose`-ed network port.
+
+This way `map` and `expose` just drop a new file rather than
+rewriting one growing document, and Claude reads the directory at
+session start so it knows the resources it has available.
 
 ## Running Claude inside the sandbox
 
