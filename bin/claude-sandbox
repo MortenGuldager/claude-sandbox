@@ -36,6 +36,22 @@ BASE_AGE_WARN_DAYS=30
 SANDBOX_IMAGE="images:ubuntu/24.04"
 SANDBOX_PROJECT_PATH="/home/ubuntu/project"
 
+# Resource limits applied at `create` time. A runaway agent inside the
+# sandbox can otherwise exhaust the host's RAM, fill all host swap, and
+# pin every CPU. Each is optional — leave blank to inherit Incus's
+# default (unlimited).
+#
+# Note: SANDBOX_MEMORY_SWAP is a *size* cap on swap usage, not a
+# boolean. cgroup v2 keeps RAM and swap as two independent budgets, so
+# capping RAM alone still lets a runaway process fill all host swap.
+# Incus's own `limits.memory.swap` key is only on/off, so we go via
+# raw.lxc → `lxc.cgroup2.memory.swap.max` and use cgroup-native suffix
+# syntax (K/M/G/T = binary). Total per-sandbox ceiling is therefore
+# SANDBOX_MEMORY + SANDBOX_MEMORY_SWAP.
+SANDBOX_MEMORY="16GiB"
+SANDBOX_MEMORY_SWAP="8G"
+SANDBOX_CPU="1"
+
 # Upstream source for the status reporter. `create` fetches this repo at
 # the resolved ref into the sandbox and runs its install.sh during the
 # base-image build. Override via the config file or the environment if
@@ -529,6 +545,10 @@ cmd_create() {
     incus config set "$CONTAINER_NAME" user.meta.hostpath "$REPO_DIR"
     incus config set "$CONTAINER_NAME" user.meta.base-hash "$BASE_HASH"
 
+    [ -n "$SANDBOX_MEMORY" ]      && incus config set "$CONTAINER_NAME" limits.memory "$SANDBOX_MEMORY"
+    [ -n "$SANDBOX_MEMORY_SWAP" ] && incus config set "$CONTAINER_NAME" raw.lxc      "lxc.cgroup2.memory.swap.max=$SANDBOX_MEMORY_SWAP"
+    [ -n "$SANDBOX_CPU" ]         && incus config set "$CONTAINER_NAME" limits.cpu   "$SANDBOX_CPU"
+
     echo "Mounting project files..."
     incus config device add "$CONTAINER_NAME" project-files disk \
         source="$REPO_DIR" \
@@ -734,10 +754,13 @@ cmd_info() {
         echo "No sandbox found for this directory."
         return 0
     fi
-    local status mapped base_hash
+    local status mapped base_hash cur_mem cur_swap cur_cpu
     status="$(incus info "$CONTAINER_NAME" | awk '/^Status/{print $2}')"
     mapped="$(incus config get "$CONTAINER_NAME" user.meta.hostpath)"
     base_hash="$(incus config get "$CONTAINER_NAME" user.meta.base-hash)"
+    cur_mem="$(incus config get "$CONTAINER_NAME" limits.memory)"
+    cur_swap="$(incus config get "$CONTAINER_NAME" raw.lxc | sed -n 's/^lxc\.cgroup2\.memory\.swap\.max=//p')"
+    cur_cpu="$(incus config get "$CONTAINER_NAME" limits.cpu)"
     echo "Sandbox info:"
     echo "  Name:      $CONTAINER_NAME"
     echo "  Status:    $status"
@@ -746,6 +769,18 @@ cmd_info() {
     echo "  Built on:  ${base_hash:-<unknown>} (current: $BASE_HASH)"
     if [ -n "$base_hash" ] && [ "$base_hash" != "$BASE_HASH" ]; then
         echo "             (sandbox predates current base; run 'destroy create' to update)"
+    fi
+    echo
+    echo "Limits:"
+    echo "  Memory:    ${cur_mem:-<unset>} (config: ${SANDBOX_MEMORY:-<unset>})"
+    echo "  Swap:      ${cur_swap:-<unset>} (config: ${SANDBOX_MEMORY_SWAP:-<unset>})"
+    [ -n "$cur_swap" ] && \
+        echo "             (free(1) inside the sandbox under-reports swap; cgroup memory.swap.max is authoritative)"
+    echo "  CPU:       ${cur_cpu:-<unset>} (config: ${SANDBOX_CPU:-<unset>})"
+    if [ "$cur_mem" != "$SANDBOX_MEMORY" ] \
+        || [ "$cur_swap" != "$SANDBOX_MEMORY_SWAP" ] \
+        || [ "$cur_cpu" != "$SANDBOX_CPU" ]; then
+        echo "             (sandbox limits differ from config; 'destroy create' to recreate, or 'incus config set $CONTAINER_NAME limits.<key> <val>' to patch in place)"
     fi
     echo
     echo "Devices:"

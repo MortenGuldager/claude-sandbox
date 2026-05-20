@@ -15,6 +15,31 @@
 # Where the host project directory is mounted inside the sandbox.
 #SANDBOX_PROJECT_PATH="/home/ubuntu/project"
 
+# Resource limits applied at `create` time. A runaway agent inside the
+# sandbox can otherwise exhaust the host's RAM, fill all host swap, and
+# pin every CPU. Leave any of them blank to inherit Incus's default
+# (unlimited). Total per-sandbox memory footprint is capped at
+# SANDBOX_MEMORY + SANDBOX_MEMORY_SWAP — the kernel's normal RAM/swap
+# balancing still runs unchanged inside those two budgets.
+#
+# RAM ceiling. When hit, processes inside the sandbox are pushed to
+# swap (and OOM-killed if swap is also full). Accepts Incus suffixes
+# (KiB/MiB/GiB/...).
+#SANDBOX_MEMORY="16GiB"
+#
+# Swap size cap (not a boolean). cgroup v2 keeps RAM and swap as
+# independent budgets, so capping RAM alone does not stop a runaway
+# from filling all host swap. Incus's own `limits.memory.swap` is
+# only on/off, so this is applied via raw.lxc →
+# `lxc.cgroup2.memory.swap.max` and uses cgroup-native suffix syntax
+# (K/M/G/T = binary, no "iB").
+#SANDBOX_MEMORY_SWAP="8G"
+#
+# CPU allocation. Accepts a count ("4"), pinned cores ("0,1"), or a
+# soft percentage ("50%"). Default of "1" prioritizes host
+# responsiveness over build/test throughput in the sandbox.
+#SANDBOX_CPU="1"
+
 # Note: the Claude auth token is NOT configured here — it is read from
 # the CLAUDE_SANDBOX_AUTH environment variable at sandbox-create time,
 # and forwarded into the sandbox as ANTHROPIC_AUTH_TOKEN. See README.
