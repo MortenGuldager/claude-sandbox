@@ -1,0 +1,82 @@
+# bash completion for claude-sandbox
+#
+# Completes:
+#   - command names (create, auth, map, dev, expose, shell, info, destroy,
+#     bases, rebuild-base, gc, help)
+#   - auth=<profile>  from ~/.claudes/*/
+#   - map=<path>      directories (comma-separated lists supported)
+#   - dev=<port>      from /dev/ttyACM* and /dev/ttyUSB* (comma-separated)
+#
+# Commands chain on the same line; each token is completed independently.
+
+_claude_sandbox() {
+    local cur prev words cword
+    # _init_completion with -s splits foo=bar into prev=foo cur=bar, so
+    # `auth=mo<TAB>` arrives here as prev=auth, cur=mo. Falls back to the
+    # naive split if bash-completion's helpers aren't loaded.
+    if declare -F _init_completion >/dev/null 2>&1; then
+        _init_completion -s || return
+    else
+        cur="${COMP_WORDS[COMP_CWORD]}"
+        prev="${COMP_WORDS[COMP_CWORD-1]:-}"
+    fi
+
+    # For comma-separated values (dev=a,b  /  map=~/x,~/y), only the part
+    # after the last comma is the active fragment. Everything up to and
+    # including that comma is a fixed prefix we re-attach to each match.
+    local list_prefix="" frag="$cur"
+    if [[ "$cur" == *,* ]]; then
+        list_prefix="${cur%,*},"
+        frag="${cur##*,}"
+    fi
+
+    case "$prev" in
+        auth)
+            local profiles=() p
+            if [ -d "$HOME/.claudes" ]; then
+                for p in "$HOME"/.claudes/*/; do
+                    [ -d "$p" ] || continue
+                    profiles+=("$(basename "$p")")
+                done
+            fi
+            COMPREPLY=( $(compgen -W "${profiles[*]}" -- "$cur") )
+            return
+            ;;
+        dev)
+            local devs=() d
+            for d in /dev/ttyACM* /dev/ttyUSB*; do
+                [ -e "$d" ] || continue
+                devs+=("$(basename "$d")")
+            done
+            local m
+            COMPREPLY=()
+            while IFS= read -r m; do
+                [ -n "$m" ] && COMPREPLY+=("${list_prefix}${m}")
+            done < <(compgen -W "${devs[*]}" -- "$frag")
+            return
+            ;;
+        map)
+            # Directory completion, comma-aware. _filedir doesn't play
+            # nicely with our list prefix, so we drive compgen directly.
+            local m
+            COMPREPLY=()
+            while IFS= read -r m; do
+                [ -n "$m" ] && COMPREPLY+=("${list_prefix}${m}")
+            done < <(compgen -d -- "$frag")
+            compopt -o nospace 2>/dev/null
+            compopt -o filenames 2>/dev/null
+            return
+            ;;
+        expose)
+            # No useful completion for port numbers.
+            COMPREPLY=()
+            return
+            ;;
+    esac
+
+    # No = on the current token: complete a command name.
+    local commands="create auth map dev expose shell info destroy bases rebuild-base gc help"
+    COMPREPLY=( $(compgen -W "$commands" -- "$cur") )
+}
+
+complete -F _claude_sandbox claude-sandbox

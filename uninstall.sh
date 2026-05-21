@@ -6,6 +6,7 @@ set -euo pipefail
 
 PREFIX="${PREFIX:-/opt/claude-sandbox}"
 BIN_LINK="${BIN_LINK:-/usr/local/bin/claude-sandbox}"
+COMPLETION_DIR="${COMPLETION_DIR:-/usr/share/bash-completion/completions}"
 
 if [ "${EUID:-$(id -u)}" -ne 0 ]; then
     echo "uninstall.sh must be run as root (try: sudo $0)" >&2
@@ -14,6 +15,9 @@ fi
 
 echo "Removing $BIN_LINK"
 rm -f "$BIN_LINK"
+
+echo "Removing $COMPLETION_DIR/claude-sandbox"
+rm -f "$COMPLETION_DIR/claude-sandbox"
 
 echo "Removing $PREFIX"
 rm -rf "$PREFIX"
