@@ -75,7 +75,7 @@ _claude_sandbox() {
     esac
 
     # No = on the current token: complete a command name.
-    local commands="create auth map dev expose shell info destroy bases rebuild-base gc help"
+    local commands="create auth map dev expose shell info list destroy bases rebuild-base gc help"
     COMPREPLY=( $(compgen -W "$commands" -- "$cur") )
 }
 
