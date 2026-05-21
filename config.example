@@ -41,9 +41,10 @@
 # responsiveness over build/test throughput in the sandbox.
 #SANDBOX_CPU="1"
 
-# Note: the Claude auth token is NOT configured here — it is read from
-# the CLAUDE_SANDBOX_AUTH environment variable at sandbox-create time,
-# and forwarded into the sandbox as ANTHROPIC_AUTH_TOKEN. See README.
+# Note: the Claude auth token is NOT configured here. Run
+# `claude-sandbox auth=<profile>` in the same chain as `create` to
+# forward the token from ~/.claudes/<profile>/sandbox-auth into the
+# sandbox as ANTHROPIC_AUTH_TOKEN. See README.
 
 # --- Status reporter -------------------------------------------------------
 #
