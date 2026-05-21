@@ -3,8 +3,9 @@
 A small wrapper around [Incus](https://linuxcontainers.org/incus/) that
 spins up disposable containers for running
 [Claude Code](https://github.com/anthropics/claude-code) against a
-project directory mounted from the host. Optionally maps a USB/serial
-device into the sandbox so Claude can talk to attached hardware.
+project directory mounted from the host. Optionally mounts extra host
+directories and passes through USB/serial devices into the sandbox so
+Claude can talk to attached hardware.
 
 A companion service inside the sandbox publishes Claude's session
 status to a configurable backend (stdout, file, MQTT, HTTP), so you
@@ -72,16 +73,18 @@ any running sandbox containers alone.
 ```sh
 cd /path/to/your/project
 CLAUDE_SANDBOX_AUTH=sk-... \
-    claude-sandbox create    # launches a container, mounts the project,
-                             # installs Claude Code, starts the reporter
-claude-sandbox map ttyACM0   # (optional) pass a USB serial device through
-claude-sandbox expose 5173   # (optional) forward host 127.0.0.1:5173 -> container
+    claude-sandbox create    # launches a container, mounts the cwd at
+                             # the same path inside, installs Claude
+                             # Code, starts the reporter
+claude-sandbox map=~/Arduino/libraries  # (optional) extra host dir, same path inside
+claude-sandbox dev=ttyACM0   # (optional) pass a USB serial device through
+claude-sandbox expose=5173   # (optional) forward host 127.0.0.1:5173 -> container
 claude-sandbox shell         # drop into the sandbox as user `ubuntu`
 # ... work ...
 claude-sandbox destroy       # nuke the container
 ```
 
-Commands chain — `claude-sandbox destroy create map=ttyACM0 shell`
+Commands chain — `claude-sandbox destroy create dev=ttyACM0 shell`
 tears the container down and brings a fresh one up in one go. The
 chain aborts on the first failure.
 
@@ -138,8 +141,33 @@ runs under. A repo-local `.git/config` in the mounted project still
 wins, via git's normal precedence. SSH keys and push credentials are
 *not* forwarded — pushing remains a host-side action.
 
-The container name is derived from your project path, so multiple
-checkouts of the same repo each get their own sandbox.
+The container name is derived from your project path (resolved
+through symlinks), so multiple checkouts of the same repo each get
+their own sandbox, and entering a project through a symlink or
+directly lands you in the same one.
+
+### Mounting host directories
+
+`create` implicitly mounts the host cwd at the *same path* inside the
+sandbox (e.g. `cd ~/myproj && claude-sandbox create` mounts at
+`/home/ubuntu/myproj` on both sides). Symlinks in the cwd are
+followed: the mount target is the resolved real path.
+
+To mount additional host directories, use `map=<path>[,<path>...]`:
+
+```sh
+claude-sandbox map=~/Arduino/libraries           # one extra dir
+claude-sandbox map=~/Arduino/libraries,/srv/data # multiple in one call
+```
+
+Each path is realpath-resolved and mounted at that same path inside
+the sandbox. The same-path invariant means relative paths, `../`, and
+the agent's mental model of "where am I" all match between host and
+sandbox. Re-mapping the same path replaces the existing mount; mounts
+accumulate across calls.
+
+Paths outside `$HOME` are allowed but you're on the hook for not
+clashing with container OS paths (`/etc`, `/usr`, etc.).
 
 ### Timezone
 
@@ -148,6 +176,20 @@ checkouts of the same repo each get their own sandbox.
 the shell, log timestamps, and Claude's sense of "now" match the
 host. The base image ships UTC, so without this step everything in
 the sandbox is offset from your wall clock.
+
+### Passing through USB/serial devices
+
+`dev[=<port>[,<port>...]]` passes one or more USB/serial devices from
+the host into the sandbox at the same `/dev/<port>` path (mode 0666 —
+no sudo needed inside). With no argument, defaults to `ttyACM0`.
+
+```sh
+claude-sandbox dev                  # ttyACM0
+claude-sandbox dev=ttyUSB0,ttyACM0  # multiple in one call
+```
+
+Additive across calls; re-mapping the same port replaces the existing
+passthrough.
 
 ### Forwarding network ports
 
@@ -171,12 +213,14 @@ device add` away.
 points Claude at `~/.claude/CLAUDE.d/`. Each runtime fact that
 depends on how the sandbox was launched lands as its own file there:
 
-- `00-sandbox.md` — container name, mounted project path, timezone.
-- `device-<port>.md` — one per `map`-ed USB/serial device, with
+- `00-sandbox.md` — container name and timezone.
+- `map-<hash>.md` — one per mounted host directory (the implicit cwd
+  mount and any `map=<path>` adds).
+- `device-<port>.md` — one per `dev`-ed USB/serial device, with
   vendor/product IDs.
 - `port-<n>.md` — one per `expose`-ed network port.
 
-This way `map` and `expose` just drop a new file rather than
+This way `map`, `dev`, and `expose` just drop a new file rather than
 rewriting one growing document, and Claude reads the directory at
 session start so it knows the resources it has available.
 
@@ -255,9 +299,12 @@ settings and their defaults. Highlights:
 | Setting                  | Default                       | Notes                                                                |
 | ------------------------ | ----------------------------- | -------------------------------------------------------------------- |
 | `SANDBOX_IMAGE`          | `images:ubuntu/24.04`         | Any Incus-compatible image.                                          |
-| `SANDBOX_PROJECT_PATH`   | `/home/ubuntu/project`        | Where your project mounts inside the sandbox.                        |
 | `REPORTER_BACKEND`       | `stdout`                      | One of: `none`, `stdout`, `file`, `mqtt`, `http`.                    |
 | `REPORTER_KEEPALIVE`     | `60`                          | Seconds between keep-alive reports (changes are sent immediately).   |
+
+The host cwd (and any extra `map=<path>` directories) are always
+mounted at the same path inside the sandbox as on the host — there is
+no setting to override that.
 
 The auth token is read from `$CLAUDE_SANDBOX_AUTH` or
 `$CLAUDE_CONFIG_DIR/sandbox-auth`, not from the config file — see
@@ -282,6 +329,23 @@ claude-sandbox (e.g. in a WSL2 distro), see the [reporter repo][reporter].
 To override which version is installed — pin to a SHA or test a fork —
 set `REPORTER_REPO` and/or `REPORTER_REF` in your config. The next
 `create` builds a fresh base image keyed off the new pin.
+
+## Migration: `map` semantics changed
+
+The `map` command used to pass through USB/serial devices, and the
+project mount was at a fixed `/home/ubuntu/project` inside the
+sandbox. Both changed:
+
+- `map=<path>` now mounts host directories (at the same path inside).
+- `dev[=<port>]` is the new name for USB/serial passthrough.
+- The host cwd is mounted at its real path inside the sandbox, not
+  at `/home/ubuntu/project`. `SANDBOX_PROJECT_PATH` is gone.
+
+Existing sandboxes created before this change still have the old
+`/home/ubuntu/project` mount and won't pick up the new layout. To
+upgrade, run `claude-sandbox destroy create` in the project
+directory. Any `map=ttyACM0`-style invocations in scripts or aliases
+need to become `dev=ttyACM0`.
 
 ## Migration from `ai-sandbox`
 

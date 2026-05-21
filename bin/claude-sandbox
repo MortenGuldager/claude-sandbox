@@ -34,7 +34,6 @@ BASE_AGE_WARN_DAYS=30
 # --- Defaults ---------------------------------------------------------------
 
 SANDBOX_IMAGE="images:ubuntu/24.04"
-SANDBOX_PROJECT_PATH="/home/ubuntu/project"
 
 # Resource limits applied at `create` time. A runaway agent inside the
 # sandbox can otherwise exhaust the host's RAM, fill all host swap, and
@@ -81,7 +80,11 @@ fi
 
 # --- Derived values ---------------------------------------------------------
 
-REPO_DIR="$(pwd)"
+# Use the resolved real path (not the logical cwd) so that entering the
+# project through a symlink and entering it directly land in the same
+# sandbox. The realpath is also what gets host-path-preserved as the
+# primary mount inside the container.
+REPO_DIR="$(realpath .)"
 PATH_HASH="$(printf '%s' "$REPO_DIR" | md5sum | cut -c1-6)"
 DIR_NAME="$(basename "$REPO_DIR" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]//g')"
 CONTAINER_NAME="csb-$DIR_NAME-$PATH_HASH"
@@ -162,26 +165,35 @@ Commands run in the given order. The chain aborts on the first failure.
 
 Examples:
   $(basename "$0") create shell
-  $(basename "$0") destroy create map=ttyACM0 shell
-  $(basename "$0") create map=ttyUSB0,ttyACM0 shell  # multiple devices
-  $(basename "$0") create map shell                  # map defaults to ttyACM0
+  $(basename "$0") destroy create dev=ttyACM0 shell
+  $(basename "$0") create dev=ttyUSB0,ttyACM0 shell  # multiple devices
+  $(basename "$0") create dev shell                  # dev defaults to ttyACM0
+  $(basename "$0") create map=~/Arduino/libraries shell  # mount an extra host dir
   $(basename "$0") create expose=5173 shell          # forward a dev-server port
 
 Commands:
   create               Launch and provision the sandbox container.
                        Builds the base image first if it is missing.
-                       Reads the auth token from \$CLAUDE_SANDBOX_AUTH
-                       or \$CLAUDE_CONFIG_DIR/sandbox-auth, forwards
-                       the host's global git user.name/email and the
+                       Mounts the host cwd at the same path inside the
+                       sandbox. Reads the auth token from
+                       \$CLAUDE_SANDBOX_AUTH or
+                       \$CLAUDE_CONFIG_DIR/sandbox-auth, forwards the
+                       host's global git user.name/email and the
                        host's timezone, and writes runtime notes to
                        ~/.claude/CLAUDE.md inside the sandbox.
   auth                 Re-read the auth token (same sources as create)
                        and write it into an existing sandbox.
-  map[=<port>[,<port>...]]
+  map=<path>[,<path>...]
+                       Mount one or more extra host directories into
+                       the sandbox at the same path as on the host.
+                       Each path is realpath'd; symlinks are followed.
+                       Additive across calls; re-mapping the same path
+                       replaces the existing mount.
+  dev[=<port>[,<port>...]]
                        Pass one or more USB/serial devices into the
                        sandbox (default port: ttyACM0). Additive:
-                       later map calls add to, rather than replace,
-                       previously mapped ports.
+                       later dev calls add to, rather than replace,
+                       previously passed-through ports.
   expose=<host>[:<container>][,...]
                        Forward a TCP port from the host's loopback into
                        the container's loopback. \`expose=5173\` maps
@@ -363,7 +375,7 @@ write_sandbox_environment_doc() {
         echo "# Sandbox"
         echo
         echo "- Container name: \`$CONTAINER_NAME\` (Incus, on the host)."
-        echo "- Host project directory is mounted read-write at \`$SANDBOX_PROJECT_PATH\`. Changes there persist on the host; everything outside that path lives only inside the container and disappears on \`destroy\`."
+        echo "- Host directories are mounted at the same path inside the sandbox as on the host (see the \`map-*.md\` files in this directory for the list). Anything outside a mapped directory lives only inside the container and disappears on \`destroy\`."
         echo "- No SSH keys, GPG keys, or cloud credentials from the host are forwarded. Pushing to remotes is a host-side action — ask the user to run it."
         if [ -n "${RESOLVED_TZ-}" ]; then
             echo "- Container clock is set to **$RESOLVED_TZ**, matching the host."
@@ -380,6 +392,32 @@ write_device_doc() {
         echo "- Vendor ID: \`$vid\`  Product ID: \`$pid\`"
         echo "- Accessible at \`$port_path\` inside the sandbox (mode 0666 — no sudo needed)."
     } | write_sandbox_user_file "$SANDBOX_CLAUDE_D/device-$port_name.md"
+}
+
+write_map_doc() {
+    local key="$1" host_path="$2" role="$3"
+    {
+        echo "# Mounted host directory: \`$host_path\`"
+        echo
+        case "$role" in
+            primary)
+                echo "- This is the project directory you invoked \`claude-sandbox\` from on the host."
+                ;;
+            *)
+                echo "- Extra directory mapped in via \`claude-sandbox map=$host_path\`."
+                ;;
+        esac
+        echo "- Mounted read-write at the same path inside the sandbox as on the host. Relative paths and \`..\` work the same on both sides."
+        echo "- Changes persist on the host; everything outside any mapped directory lives only inside the container and disappears on \`destroy\`."
+    } | write_sandbox_user_file "$SANDBOX_CLAUDE_D/map-$key.md"
+}
+
+# Derives a stable, short, Incus-safe key from an absolute host path.
+# Used both for the Incus device name (`claude-map-<key>`) and the
+# per-mount CLAUDE.d filename (`map-<key>.md`) so a remap of the same
+# path is naturally idempotent.
+map_key_for_path() {
+    printf '%s' "$1" | md5sum | cut -c1-10
 }
 
 write_port_doc() {
@@ -549,10 +587,8 @@ cmd_create() {
     [ -n "$SANDBOX_MEMORY_SWAP" ] && incus config set "$CONTAINER_NAME" raw.lxc      "lxc.cgroup2.memory.swap.max=$SANDBOX_MEMORY_SWAP"
     [ -n "$SANDBOX_CPU" ]         && incus config set "$CONTAINER_NAME" limits.cpu   "$SANDBOX_CPU"
 
-    echo "Mounting project files..."
-    incus config device add "$CONTAINER_NAME" project-files disk \
-        source="$REPO_DIR" \
-        path="$SANDBOX_PROJECT_PATH" >/dev/null
+    echo "Mounting project directory at $REPO_DIR..."
+    attach_map_mount "$REPO_DIR"
 
     echo "Writing reporter config (backend=$REPORTER_BACKEND)..."
     local tmp
@@ -596,6 +632,7 @@ cmd_create() {
     echo "Writing sandbox environment notes to $SANDBOX_CLAUDE_MD..."
     write_sandbox_claude_md_stub
     write_sandbox_environment_doc
+    write_map_doc "$(map_key_for_path "$REPO_DIR")" "$REPO_DIR" "primary"
 
     echo "Sandbox is ready."
 }
@@ -612,13 +649,13 @@ cmd_auth() {
     echo "Token updated. New shells will pick it up."
 }
 
-cmd_map() {
+cmd_dev() {
     require_container
     local arg="${1:-ttyACM0}"
 
-    # Comma-separated list so `map=ttyUSB0,ttyACM0` adds both in one
+    # Comma-separated list so `dev=ttyUSB0,ttyACM0` adds both in one
     # call. Each port gets its own Incus device names so subsequent
-    # `map=<port>` calls are additive — remapping one port does not
+    # `dev=<port>` calls are additive — remapping one port does not
     # disturb others already passed through.
     local -a names=() vids=() pids=() paths=()
     local raw port_name port_path ids vid pid
@@ -676,7 +713,86 @@ cmd_map() {
             mode=0666
 
         write_device_doc "$port_name" "$port_path" "$vid" "$pid"
-        echo "Device mapped: $port_path"
+        echo "Device passed through: $port_path"
+    done
+}
+
+# Attaches a single host path as a disk device mounted at the same
+# path inside the sandbox. Device-only — does not write the CLAUDE.d
+# doc, so this is safe to call before `incus start` (where `incus
+# exec` would fail). Caller is responsible for resolving and
+# validating the host path, and for arranging that write_map_doc runs
+# once the container is up.
+attach_map_mount() {
+    local host_path="$1"
+    local key dev_name
+    key="$(map_key_for_path "$host_path")"
+    dev_name="claude-map-$key"
+
+    incus config device remove "$CONTAINER_NAME" "$dev_name" 2>/dev/null || true
+    incus config device add "$CONTAINER_NAME" "$dev_name" disk \
+        source="$host_path" \
+        path="$host_path" >/dev/null
+}
+
+# Attach + write the doc + echo. Use this from contexts where the
+# container is already running (e.g. cmd_map). cmd_create attaches
+# before start and writes the doc afterwards via write_map_doc.
+add_map_mount() {
+    local host_path="$1" role="$2"
+    attach_map_mount "$host_path"
+    write_map_doc "$(map_key_for_path "$host_path")" "$host_path" "$role"
+    echo "Directory mounted: $host_path"
+}
+
+# Mounts one or more host directories at the same path inside the
+# sandbox. Comma-separated list so `map=~/a,~/b` adds both in one call.
+# Each path is realpath'd (so a symlinked argument lands at its true
+# location) and must already exist on the host. Re-mapping a path is
+# idempotent — it replaces the existing Incus device.
+cmd_map() {
+    require_container
+    local arg="$1"
+
+    local -a host_paths=()
+    local raw expanded resolved
+    local old_ifs="$IFS"
+    IFS=','
+    for raw in $arg; do
+        raw="${raw## }"
+        raw="${raw%% }"
+        [ -z "$raw" ] && continue
+        # Tilde-expand defensively. Bash usually expands `map=~/foo` at
+        # the call site, but quoting (`'map=~/foo'`) suppresses that,
+        # and a config-driven invocation can also arrive un-expanded.
+        case "$raw" in
+            "~")    expanded="$HOME" ;;
+            "~/"*)  expanded="$HOME/${raw#~/}" ;;
+            *)      expanded="$raw" ;;
+        esac
+        if [ ! -e "$expanded" ]; then
+            IFS="$old_ifs"
+            echo "map: host path '$expanded' does not exist." >&2
+            exit 1
+        fi
+        if [ ! -d "$expanded" ]; then
+            IFS="$old_ifs"
+            echo "map: host path '$expanded' is not a directory." >&2
+            exit 1
+        fi
+        resolved="$(realpath "$expanded")"
+        host_paths+=("$resolved")
+    done
+    IFS="$old_ifs"
+
+    if [ "${#host_paths[@]}" -eq 0 ]; then
+        echo "No paths given." >&2
+        exit 1
+    fi
+
+    local p
+    for p in "${host_paths[@]}"; do
+        add_map_mount "$p" "extra"
     done
 }
 
@@ -740,13 +856,16 @@ cmd_expose() {
 cmd_shell() {
     require_container
     echo "Opening shell in $CONTAINER_NAME..."
-    # Land in the mounted project dir, not $HOME. Sandboxes are
-    # project-scoped, and the prompt still shows the cwd so there's
-    # no surprise. Fall back to $HOME if the mount is missing.
-    local path
-    path="$(printf '%q' "$SANDBOX_PROJECT_PATH")"
+    # Land in the same path as the host cwd (host paths are preserved
+    # inside the sandbox). Sandboxes are project-scoped, and the prompt
+    # still shows the cwd so there's no surprise. Read the mount target
+    # back from container metadata rather than the current process cwd,
+    # so `shell` from a sibling directory still lands in the right place.
+    local mount_path quoted
+    mount_path="$(incus config get "$CONTAINER_NAME" user.meta.hostpath)"
+    quoted="$(printf '%q' "$mount_path")"
     incus exec "$CONTAINER_NAME" -- sudo --login --user ubuntu \
-        bash -c "cd $path 2>/dev/null || cd ~; exec bash -i"
+        bash -c "cd $quoted 2>/dev/null || cd ~; exec bash -i"
 }
 
 cmd_info() {
@@ -923,7 +1042,13 @@ for token in "$@"; do
                 exit 1
             fi
             ;;
+        dev)
+            ;;
         map)
+            if [ "$TOKEN_HAS_ARG" -ne 1 ] || [ -z "$TOKEN_ARG" ]; then
+                echo "Command 'map' requires an argument, e.g. map=~/Arduino/libraries" >&2
+                exit 1
+            fi
             ;;
         expose)
             if [ "$TOKEN_HAS_ARG" -ne 1 ] || [ -z "$TOKEN_ARG" ]; then
@@ -945,6 +1070,7 @@ for token in "$@"; do
         create)         cmd_create ;;
         auth)           cmd_auth ;;
         map)            cmd_map "$TOKEN_ARG" ;;
+        dev)            cmd_dev "$TOKEN_ARG" ;;
         expose)         cmd_expose "$TOKEN_ARG" ;;
         shell)          cmd_shell ;;
         info)           cmd_info ;;

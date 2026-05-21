@@ -5,7 +5,39 @@ that aren't implemented, decisions made for simplicity that may want
 revisiting, and small polish items. Not user-facing documentation —
 that lives in `README.md`.
 
-Last updated: 2026-05-11
+Last updated: 2026-05-21
+
+## Design decisions
+
+### Same-path mounting over side-by-side (2026-05-21, branch `map-redesign`)
+When the `map` command was extended from USB-only to also cover
+filesystem mounts, the alternative was to drop extra dirs as siblings
+under one fixed prefix (e.g. `/home/ubuntu/project/foo`,
+`/home/ubuntu/project/bar`). We chose to preserve the host path
+instead: `map=~/Arduino/libraries/foo` mounts at
+`/home/ubuntu/Arduino/libraries/foo` inside.
+
+Reason: the side-by-side layout breaks the agent's relative-path
+mental model. With same-path mounting, `../`, relative paths, and
+"where am I" all match between host and sandbox — including for the
+implicit cwd mount, which is why `SANDBOX_PROJECT_PATH` was also
+dropped rather than kept as an exception.
+
+Trade-offs accepted:
+- Non-`$HOME` paths are allowed (e.g. `/srv/data`); the caller is on
+  the hook for not clashing with container OS paths (`/etc`, `/usr`).
+- Symlinks in `map=` arguments are followed (`realpath`), so
+  `~/Arduino` → `/mnt/ssd/Arduino` lands at the resolved location.
+- Cwd uses `realpath` too, so entering through a symlink and entering
+  directly land in the same sandbox.
+- Breaking change for existing sandboxes — see README migration note.
+- `map` and `dev` (renamed from the old USB `map`) plus `expose` form
+  a clean trichotomy: filesystem / hardware / network.
+
+**Revisit when:** the same-path invariant causes a real conflict —
+e.g. someone wants to mount two host paths that resolve to the same
+realpath, or wants the old `/home/ubuntu/project` layout back for a
+specific workflow.
 
 ## Design questions (need usage experience)
 
@@ -85,7 +117,8 @@ Options if this becomes a recurring pain:
 `create` and `shell` were exercised on a real Incus host during the
 base-image-caching refactor (2026-05-10). Still unverified end-to-end:
 `bases`, `gc`, `rebuild-base`, `destroy`, the 30-day age warning, the
-USB/serial `map` flow, and all four reporter backends.
+USB/serial `dev` flow, the filesystem `map` flow, and all four
+reporter backends.
 
 **Revisit when:** before the first public push, or earlier if any of
 the above paths is touched.

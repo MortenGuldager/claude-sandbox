@@ -12,8 +12,9 @@
 # Incus image to launch.
 #SANDBOX_IMAGE="images:ubuntu/24.04"
 
-# Where the host project directory is mounted inside the sandbox.
-#SANDBOX_PROJECT_PATH="/home/ubuntu/project"
+# Note: there is no SANDBOX_PROJECT_PATH setting. Host directories are
+# mounted at the same path inside the sandbox as on the host — `create`
+# mounts the cwd implicitly, and `map=<path>` adds more.
 
 # Resource limits applied at `create` time. A runaway agent inside the
 # sandbox can otherwise exhaust the host's RAM, fill all host swap, and
