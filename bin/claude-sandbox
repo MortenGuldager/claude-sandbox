@@ -20,7 +20,7 @@ SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
 # Bumped manually when build logic changes in a way not captured by the
 # other hash inputs (e.g. we add a new step that doesn't affect any
 # tracked file). Forces a rebuild.
-BASE_SCHEMA_VERSION=4
+BASE_SCHEMA_VERSION=5
 
 # Packages installed into the base image. Order does not matter; the
 # hash sorts before digesting. `npm` is intentionally absent — it ships
@@ -457,9 +457,13 @@ write_port_doc() {
 seed_claude_first_run_state() {
     # Script body runs inside the container as user ubuntu; $1 is the
     # repo path, passed positionally so no host-side expansion happens.
+    # `-H` sets HOME so `~` resolves to /home/ubuntu. claude lives in
+    # the user-local ~/.local/bin (see build_base_image), which this
+    # non-login shell wouldn't otherwise have on PATH.
     # shellcheck disable=SC2016
-    incus exec "$CONTAINER_NAME" -- sudo -u ubuntu bash -c '
+    incus exec "$CONTAINER_NAME" -- sudo -u ubuntu -H bash -c '
         set -e
+        export PATH="$HOME/.local/bin:$PATH"
         repo=$1
         tmp=$(mktemp)
         mkdir -p ~/.claude
@@ -563,8 +567,19 @@ build_base_image() {
     incus exec "$BUILD_CONTAINER" -- env DEBIAN_FRONTEND=noninteractive \
         apt-get install -y "${BASE_PACKAGES[@]}"
 
-    echo "  Installing @anthropic-ai/claude-code..."
-    incus exec "$BUILD_CONTAINER" -- npm install -g @anthropic-ai/claude-code
+    echo "  Installing @anthropic-ai/claude-code into ubuntu's ~/.local..."
+    # Installed as the unprivileged ubuntu user with an npm prefix
+    # under its home, not as root into /usr. Claude Code's auto-updater
+    # shells out to `npm i -g`; a user-owned prefix keeps that path
+    # writable, so updates succeed instead of failing on every launch.
+    # The prefix is persisted in ~/.npmrc, which the updater's own npm
+    # invocation also reads. `~/.local/bin` is already on PATH via
+    # Ubuntu's stock ~/.profile.
+    incus exec "$BUILD_CONTAINER" -- sudo -u ubuntu -H bash -c '
+        set -e
+        npm config set prefix ~/.local
+        npm install -g @anthropic-ai/claude-code
+    '
 
     echo "  Installing yolo-claude alias..."
     echo "alias yolo-claude='claude --dangerously-skip-permissions'" | \

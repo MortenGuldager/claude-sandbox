@@ -254,6 +254,20 @@ one-time prompts — theme picker, onboarding/security notice, the
 jq-merged, not overwritten. The theme is fixed to dark; change it
 in-session with `/theme` if you want something else.
 
+### Updating Claude Code
+
+Claude Code is installed under the `ubuntu` user's `~/.local` (an npm
+prefix in its home), not system-wide in `/usr`. That keeps the install
+path writable by the unprivileged user, so Claude Code's own
+auto-updater works inside a running sandbox instead of failing on
+every launch.
+
+The base image still bakes in whatever version was current when it
+was built; the auto-updater then carries an individual sandbox forward
+from there. To refresh the baked-in starting version, run
+`rebuild-base` (the `bases` listing warns once a base is over 30 days
+old).
+
 ## Base image caching
 
 The first `create` is slow (~90 s) because it builds a base image with
