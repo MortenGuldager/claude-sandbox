@@ -80,6 +80,7 @@ claude-sandbox map=~/Arduino/libraries  # (optional) extra host dir, same path i
 claude-sandbox dev=ttyACM0   # (optional) pass a USB serial device through
 claude-sandbox expose=5173   # (optional) forward host 127.0.0.1:5173 -> container
 claude-sandbox shell         # drop into the sandbox as user `ubuntu`
+claude-sandbox yolo          # ...or launch Claude in the sandbox directly
 # ... work ...
 claude-sandbox destroy       # nuke the container
 ```
@@ -218,16 +219,40 @@ session start so it knows the resources it has available.
 
 ## Running Claude inside the sandbox
 
-Two ways to invoke it:
+The quickest path is `claude-sandbox yolo`: it execs straight into
+`claude --dangerously-skip-permissions` inside the sandbox without
+stopping at a shell first. Since launching Claude that way is what
+nearly every sandbox session does, `yolo` is a peer of `shell` rather
+than something you type after it. It needs a running container, so
+chain it after `create` (`claude-sandbox create auth=mogul yolo`) or
+run it standalone against an existing sandbox.
+
+Once you're at a `shell` prompt, there are two ways to invoke Claude
+by hand:
 
 - `claude` — default. Prompts for permission on tool calls, like a
   host install.
-- `yolo-claude` — alias for `claude --dangerously-skip-permissions`.
-  Skips all prompts; the sandbox isolation is the load-bearing
-  protection. Before using it, make sure no identity keys (SSH, GPG,
-  cloud credentials, GitHub tokens) have leaked into the mounted
-  project directory — anything inside the mount is fair game for a
-  prompted-or-tricked agent.
+- `yolo-claude` — alias for `claude --dangerously-skip-permissions`,
+  the same thing the `yolo` subcommand runs.
+
+Skipping prompts leans entirely on the sandbox isolation as the
+load-bearing protection. Before using either `yolo` form, make sure no
+identity keys (SSH, GPG, cloud credentials, GitHub tokens) have leaked
+into the mounted project directory — anything inside the mount is fair
+game for a prompted-or-tricked agent.
+
+### First-run prompts
+
+A fresh Claude Code install otherwise greets you with a chain of
+one-time prompts — theme picker, onboarding/security notice, the
+"trust this folder?" dialog, and the bypass-permissions warning.
+`create` pre-accepts all four by seeding `~/.claude/settings.json`
+(`theme`, `skipDangerousModePermissionPrompt`) and `~/.claude.json`
+(`hasCompletedOnboarding`, `lastOnboardingVersion`, and
+`hasTrustDialogAccepted` for the mounted repo path), so the first
+`yolo` or `claude` lands directly in a session. Both files are
+jq-merged, not overwritten. The theme is fixed to dark; change it
+in-session with `/theme` if you want something else.
 
 ## Base image caching
 

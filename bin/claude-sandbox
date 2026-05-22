@@ -178,8 +178,11 @@ Commands:
                        sandbox, forwards the host's global git
                        user.name/email and the host's timezone, and
                        writes runtime notes to ~/.claude/CLAUDE.md
-                       inside the sandbox. Does NOT set the Claude auth
-                       token — chain auth=<profile> after it for that.
+                       inside the sandbox, and pre-accepts Claude
+                       Code's first-run prompts (theme, onboarding,
+                       folder trust, bypass-permissions). Does NOT set
+                       the Claude auth token — chain auth=<profile>
+                       after it for that.
   auth=<profile>       Write the Claude auth token from
                        ~/.claudes/<profile>/sandbox-auth into the
                        sandbox. Requires an existing container, so
@@ -204,6 +207,9 @@ Commands:
                        across calls; re-exposing a host port replaces
                        the existing forward.
   shell                Open a login shell inside the sandbox.
+  yolo                 Launch Claude inside the sandbox straight away
+                       with --dangerously-skip-permissions, skipping
+                       the shell. Requires a running container.
   info                 Show sandbox status and mounted devices.
   list                 List all claude-sandbox containers on the host
                        with their auth profile and primary path.
@@ -434,6 +440,48 @@ write_port_doc() {
     } | write_sandbox_user_file "$SANDBOX_CLAUDE_D/port-$host_port.md"
 }
 
+# Pre-accepts Claude Code's first-run interactive prompts so a freshly
+# created sandbox launches straight into a usable session instead of
+# stopping for the theme picker, the onboarding/security notice, the
+# per-folder trust dialog, and the bypass-permissions warning. State is
+# split across two files Claude reads at startup:
+#   ~/.claude/settings.json  theme, skipDangerousModePermissionPrompt
+#   ~/.claude.json           hasCompletedOnboarding, lastOnboardingVersion,
+#                            and the per-project hasTrustDialogAccepted
+#                            flag keyed by the mounted repo path.
+# Both are merged with jq rather than overwritten, so anything the base
+# image already wrote survives. lastOnboardingVersion is pinned to the
+# installed claude version so a version bump doesn't re-trigger the
+# onboarding flow. Runs after the container is up; the files normally
+# don't exist yet (Claude has never started), hence the `{}` seed.
+seed_claude_first_run_state() {
+    # Script body runs inside the container as user ubuntu; $1 is the
+    # repo path, passed positionally so no host-side expansion happens.
+    # shellcheck disable=SC2016
+    incus exec "$CONTAINER_NAME" -- sudo -u ubuntu bash -c '
+        set -e
+        repo=$1
+        tmp=$(mktemp)
+        mkdir -p ~/.claude
+
+        settings=~/.claude/settings.json
+        [ -f "$settings" ] || echo "{}" > "$settings"
+        jq ".theme = \"dark\" | .skipDangerousModePermissionPrompt = true" \
+            "$settings" > "$tmp" && mv "$tmp" "$settings"
+
+        state=~/.claude.json
+        [ -f "$state" ] || echo "{}" > "$state"
+        ver=$(claude --version 2>/dev/null | grep -oE "[0-9]+\.[0-9]+\.[0-9]+" | head -n1)
+        jq --arg repo "$repo" --arg ver "$ver" "
+              .hasCompletedOnboarding = true
+            | (if \$ver != \"\" then .lastOnboardingVersion = \$ver else . end)
+            | .projects[\$repo].hasTrustDialogAccepted = true
+        " "$state" > "$tmp" && mv "$tmp" "$state"
+
+        rm -f "$tmp"
+    ' _ "$REPO_DIR"
+}
+
 write_reporter_env_file() {
     local out="$1"
     {
@@ -625,6 +673,9 @@ cmd_create() {
     write_sandbox_claude_md_stub
     write_sandbox_environment_doc
     write_map_doc "$(map_key_for_path "$REPO_DIR")" "$REPO_DIR" "primary"
+
+    echo "Pre-accepting Claude Code first-run prompts (theme, onboarding, trust, bypass)..."
+    seed_claude_first_run_state
 
     echo "Sandbox is ready."
 }
@@ -858,6 +909,28 @@ cmd_shell() {
         bash -c "cd $quoted 2>/dev/null || cd ~; exec bash -i"
 }
 
+# Like cmd_shell, but instead of leaving you at a prompt, exec straight
+# into Claude with permission prompts disabled. Equivalent to running
+# the `yolo-claude` alias by hand after `shell` — it just saves the
+# step, since launching Claude this way is what nearly every sandbox
+# session does. The sandbox isolation is the load-bearing protection
+# that makes --dangerously-skip-permissions acceptable; see the README.
+#
+# The inner shell must be interactive (`bash -i`): the auth token is
+# exported from ~/.bashrc, and Ubuntu's stock .bashrc bails out at the
+# top for non-interactive shells, so a plain `bash -c` would launch
+# Claude with no ANTHROPIC_AUTH_TOKEN set. This mirrors how cmd_shell
+# reaches an interactive shell.
+cmd_yolo() {
+    require_container
+    echo "Launching Claude (--dangerously-skip-permissions) in $CONTAINER_NAME..."
+    local mount_path quoted
+    mount_path="$(incus config get "$CONTAINER_NAME" user.meta.hostpath)"
+    quoted="$(printf '%q' "$mount_path")"
+    incus exec "$CONTAINER_NAME" -- sudo --login --user ubuntu \
+        bash -c "cd $quoted 2>/dev/null || cd ~; exec bash -ic 'exec claude --dangerously-skip-permissions'"
+}
+
 cmd_info() {
     if ! container_exists "$CONTAINER_NAME"; then
         echo "No sandbox found for this directory."
@@ -1058,7 +1131,7 @@ split_token() {
 for token in "$@"; do
     split_token "$token"
     case "$TOKEN_CMD" in
-        create|shell|info|list|destroy|bases|rebuild-base|gc|help|-h|--help)
+        create|shell|yolo|info|list|destroy|bases|rebuild-base|gc|help|-h|--help)
             if [ "$TOKEN_HAS_ARG" -eq 1 ]; then
                 echo "Command '$TOKEN_CMD' takes no argument; got '$token'" >&2
                 exit 1
@@ -1101,6 +1174,7 @@ for token in "$@"; do
         dev)            cmd_dev "$TOKEN_ARG" ;;
         expose)         cmd_expose "$TOKEN_ARG" ;;
         shell)          cmd_shell ;;
+        yolo)           cmd_yolo ;;
         info)           cmd_info ;;
         list)           cmd_list ;;
         destroy)        cmd_destroy ;;
