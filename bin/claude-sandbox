@@ -520,6 +520,57 @@ write_reporter_env_file() {
     } > "$out"
 }
 
+# The reporter is a systemd *user* unit owned by `ubuntu`. We pre-enable
+# linger as root so the user manager is up before user-setup.sh runs
+# (which keeps the script from having to negotiate polkit under sudo).
+# Then we drop our generated config into ~/.config/claude-status-reporter/
+# *before* user-setup.sh enables the service, so `enable --now` starts
+# with the configured backend rather than the example's stdout default.
+enable_reporter_for_ubuntu() {
+    local i ubuntu_uid
+
+    # `incus start` returns the moment PID 1 is up, but D-Bus / logind
+    # take another second or two to listen. Poll loginctl until it can
+    # reach the bus — otherwise the first call below would fail with
+    # "Failed to connect to bus: No such file or directory".
+    for i in $(seq 1 60); do
+        if incus exec "$CONTAINER_NAME" -- loginctl >/dev/null 2>&1; then
+            break
+        fi
+        sleep 0.5
+    done
+
+    incus exec "$CONTAINER_NAME" -- loginctl enable-linger ubuntu
+
+    ubuntu_uid="$(incus exec "$CONTAINER_NAME" -- id -u ubuntu)"
+
+    # enable-linger starts user@UID.service asynchronously. Wait until
+    # the user manager is reachable before we try `systemctl --user`.
+    for i in $(seq 1 60); do
+        if incus exec "$CONTAINER_NAME" \
+            --user "$ubuntu_uid" --group "$ubuntu_uid" \
+            --env "XDG_RUNTIME_DIR=/run/user/$ubuntu_uid" \
+            -- systemctl --user show-environment >/dev/null 2>&1; then
+            break
+        fi
+        sleep 0.5
+    done
+
+    local config="/home/ubuntu/.config/claude-status-reporter/config.env"
+    write_reporter_env_file /dev/stdout | \
+        write_sandbox_user_file "$config"
+    incus exec "$CONTAINER_NAME" -- chmod 0600 "$config"
+
+    incus exec "$CONTAINER_NAME" \
+        --user "$ubuntu_uid" --group "$ubuntu_uid" \
+        --cwd /home/ubuntu \
+        --env "HOME=/home/ubuntu" \
+        --env "USER=ubuntu" \
+        --env "LOGNAME=ubuntu" \
+        --env "XDG_RUNTIME_DIR=/run/user/$ubuntu_uid" \
+        -- /opt/claude-status-reporter/bin/user-setup.sh
+}
+
 # Returns the age of the base image in days, or empty if unknown.
 base_image_age_days() {
     local uploaded
@@ -665,16 +716,11 @@ cmd_create() {
     echo "Mounting project directory at $REPO_DIR..."
     attach_map_mount "$REPO_DIR"
 
-    echo "Writing reporter config (backend=$REPORTER_BACKEND)..."
-    local tmp
-    tmp="$(mktemp)"
-    write_reporter_env_file "$tmp"
-    incus file push "$tmp" \
-        "$CONTAINER_NAME/etc/claude-status-reporter.env" --mode 0644
-    rm -f "$tmp"
-
     echo "Starting sandbox..."
     incus start "$CONTAINER_NAME"
+
+    echo "Configuring claude-status-reporter (backend=$REPORTER_BACKEND)..."
+    enable_reporter_for_ubuntu
 
     if resolve_git_identity; then
         echo "Forwarding git identity: $RESOLVED_GIT_NAME <$RESOLVED_GIT_EMAIL>"

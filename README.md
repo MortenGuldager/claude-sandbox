@@ -345,13 +345,16 @@ See [Multiple Claude accounts](#multiple-claude-accounts).
 
 `claude-sandbox create` installs
 [claude-status-reporter][reporter] inside the sandbox as a systemd
-service. It watches `~/.claude/sessions/` and publishes the aggregated
-status to a configurable backend (stdout, file, MQTT, HTTP).
+*user* service for `ubuntu`. It watches `~/.claude/sessions/` and
+publishes the aggregated status to a configurable backend (stdout,
+file, MQTT, HTTP).
 
 You configure backend and credentials through the `REPORTER_*` settings
 in `~/.config/claude-sandbox/config` (see `config.example`).
 `claude-sandbox` translates those into the sandbox's
-`/etc/claude-status-reporter.env` at create-time.
+`~ubuntu/.config/claude-status-reporter/config.env` at create-time, then
+runs the reporter's `user-setup.sh` to enable linger and start the
+service.
 
 For the payload schema, full backend details, the public-MQTT-broker
 warning, and instructions for installing the reporter outside of
@@ -410,9 +413,11 @@ If you have an install from before the rename:
    ```
 6. Install the new version (see [Install](#install)).
 
-The internal layout (status reporter unit, env file at
-`/etc/claude-status-reporter.env`, mount paths inside the container)
-is unchanged — those names were already Claude-specific.
+The internal layout has shifted since the rename: the reporter is now
+installed under `/opt/claude-status-reporter`, runs as a systemd *user*
+service, and reads `~ubuntu/.config/claude-status-reporter/config.env`
+instead of the old system-wide env file. Container names are
+Claude-specific (`csb-` prefix).
 
 ## Project layout
 
