@@ -427,6 +427,17 @@ map_key_for_path() {
     printf '%s' "$1" | md5sum | cut -c1-10
 }
 
+write_git_doc() {
+    {
+        echo "# Git"
+        echo
+        echo "- Default trunk branch is \`main\`, not \`master\`. Use \`main\` when creating branches, opening PRs, or referencing the trunk, unless a specific repo clearly uses a different name."
+        if [ -n "${RESOLVED_GIT_NAME-}" ] && [ -n "${RESOLVED_GIT_EMAIL-}" ]; then
+            echo "- Commits in this sandbox are authored as \`$RESOLVED_GIT_NAME <$RESOLVED_GIT_EMAIL>\` (forwarded from the host's global \`git config\`). Use this identity in any PR description, commit message, or GitHub interaction that needs to name the author."
+        fi
+    } | write_sandbox_user_file "$SANDBOX_CLAUDE_D/01-git.md"
+}
+
 write_port_doc() {
     local host_port="$1" container_port="$2"
     {
@@ -687,6 +698,7 @@ cmd_create() {
     echo "Writing sandbox environment notes to $SANDBOX_CLAUDE_MD..."
     write_sandbox_claude_md_stub
     write_sandbox_environment_doc
+    write_git_doc
     write_map_doc "$(map_key_for_path "$REPO_DIR")" "$REPO_DIR" "primary"
 
     echo "Pre-accepting Claude Code first-run prompts (theme, onboarding, trust, bypass)..."
