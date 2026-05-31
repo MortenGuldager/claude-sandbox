@@ -193,6 +193,17 @@ recipes over years does not bloat session context — only skills whose
 descriptions match the current task are read in. Out-of-date recipes
 sit harmlessly until you prune them.
 
+To make sure Claude in any fresh sandbox understands this layout
+without bloating the always-loaded startup context, `create` also
+seeds a managed `claude-sandbox` skill into the skills dir. Its
+description matches when Claude is about to author a skill, write
+memory, or troubleshoot files that didn't survive a rebuild — so the
+deeper guidance ("when is something a skill vs. memory", "how to
+author either", "what is ephemeral and why") loads on demand rather
+than every session. The file is regenerated on every `create` so it
+tracks the tool version; rename the directory if you want a custom
+copy that survives.
+
 ### Timezone
 
 `create` resolves the host's timezone (`timedatectl` → `/etc/timezone`
@@ -239,9 +250,11 @@ depends on how the sandbox was launched lands as its own file there:
 
 - `00-sandbox.md` — container name and timezone.
 - `01-git.md` — trunk branch and the forwarded git identity.
-- `02-persistence.md` — points at the host-mounted skills and
+- `02-persistence.md` — short pointer to the host-mounted skills and
   per-project memory directories (see [Persistent state across
-  sandboxes](#persistent-state-across-sandboxes)).
+  sandboxes](#persistent-state-across-sandboxes)); the in-depth
+  conventions live in the seeded `claude-sandbox` skill so they
+  lazy-load on demand instead of bloating startup context.
 - `map-<hash>.md` — one per mounted host directory (the implicit cwd
   mount and any `map=<path>` adds).
 - `device-<port>.md` — one per `dev`-ed USB/serial device, with
