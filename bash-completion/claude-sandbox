@@ -79,4 +79,4 @@ _claude_sandbox() {
     COMPREPLY=( $(compgen -W "$commands" -- "$cur") )
 }
 
-complete -F _claude_sandbox claude-sandbox
+complete -F _claude_sandbox claude-sandbox csb CSB
