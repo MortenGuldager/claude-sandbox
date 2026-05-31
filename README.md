@@ -162,6 +162,37 @@ accumulate across calls.
 Paths outside `$HOME` are allowed but you're on the hook for not
 clashing with container OS paths (`/etc`, `/usr`, etc.).
 
+### Persistent state across sandboxes
+
+Sandboxes are deliberately disposable, but Claude's own learned context
+shouldn't be. `create` auto-mounts two host directories at the exact
+paths Claude Code already uses, so user skills and per-project
+auto-memory survive `destroy create`:
+
+```
+~/.config/claude-sandbox/skills/         -> ~/.claude/skills/                  (shared across all sandboxes)
+~/.config/claude-sandbox/memory/<slug>/  -> ~/.claude/projects/<slug>/memory/  (per project)
+```
+
+`<slug>` is the project realpath with `/` replaced by `-` — the same
+convention Claude Code uses internally for naming per-project state
+dirs. Because `claude-sandbox` mounts the project at the same path
+on both host and sandbox, the slug is identical on both sides, so the
+binding is fully deterministic.
+
+Both dirs are created on first `create` and mounted read-write, so
+Claude can author new skills and write memory entries during a
+session and have them persist on the host. The user edits or prunes
+them directly between sandbox lifecycles. Sessions and todos under
+`~/.claude/projects/<slug>/` (siblings of `memory/`) deliberately stay
+ephemeral — they are per-conversation state, not knowledge to carry
+forward.
+
+Skills are lazy-loaded by their `description` field, so accumulating
+recipes over years does not bloat session context — only skills whose
+descriptions match the current task are read in. Out-of-date recipes
+sit harmlessly until you prune them.
+
 ### Timezone
 
 `create` resolves the host's timezone (`timedatectl` → `/etc/timezone`
@@ -207,6 +238,10 @@ points Claude at `~/.claude/CLAUDE.d/`. Each runtime fact that
 depends on how the sandbox was launched lands as its own file there:
 
 - `00-sandbox.md` — container name and timezone.
+- `01-git.md` — trunk branch and the forwarded git identity.
+- `02-persistence.md` — points at the host-mounted skills and
+  per-project memory directories (see [Persistent state across
+  sandboxes](#persistent-state-across-sandboxes)).
 - `map-<hash>.md` — one per mounted host directory (the implicit cwd
   mount and any `map=<path>` adds).
 - `device-<port>.md` — one per `dev`-ed USB/serial device, with

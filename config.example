@@ -16,6 +16,15 @@
 # mounted at the same path inside the sandbox as on the host — `create`
 # mounts the cwd implicitly, and `map=<path>` adds more.
 
+# Note: `create` also auto-mounts two persistence directories so Claude
+# state survives sandbox destroy/create cycles, with no setting needed:
+#   ~/.config/claude-sandbox/skills/         -> /home/ubuntu/.claude/skills/
+#       (user-defined skills, shared across every sandbox)
+#   ~/.config/claude-sandbox/memory/<slug>/  -> /home/ubuntu/.claude/projects/<slug>/memory/
+#       (auto-memory, scoped to this project's host path)
+# `<slug>` is the project realpath with `/` replaced by `-`, matching
+# Claude Code's own naming. The host dirs are created on first `create`.
+
 # Resource limits applied at `create` time. A runaway agent inside the
 # sandbox can otherwise exhaust the host's RAM, fill all host swap, and
 # pin every CPU. Leave any of them blank to inherit Incus's default

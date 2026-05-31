@@ -73,6 +73,7 @@ REPORTER_HTTP_URL=""
 # --- Load user config -------------------------------------------------------
 
 CONFIG_FILE="${CLAUDE_SANDBOX_CONFIG:-$HOME/.config/claude-sandbox/config}"
+CONFIG_DIR="$(dirname "$CONFIG_FILE")"
 if [ -f "$CONFIG_FILE" ]; then
     # shellcheck source=/dev/null
     . "$CONFIG_FILE"
@@ -427,6 +428,14 @@ map_key_for_path() {
     printf '%s' "$1" | md5sum | cut -c1-10
 }
 
+# Project slug matching Claude Code's own convention for naming
+# per-project state dirs under `~/.claude/projects/`: the absolute path
+# with `/` replaced by `-` (so `/a/b/c` -> `-a-b-c`). Used to bind a
+# host-side memory directory to the matching in-sandbox path.
+project_slug_for_path() {
+    printf '%s' "$1" | tr '/' '-'
+}
+
 write_git_doc() {
     {
         echo "# Git"
@@ -436,6 +445,26 @@ write_git_doc() {
             echo "- Commits in this sandbox are authored as \`$RESOLVED_GIT_NAME <$RESOLVED_GIT_EMAIL>\` (forwarded from the host's global \`git config\`). Use this identity in any PR description, commit message, or GitHub interaction that needs to name the author."
         fi
     } | write_sandbox_user_file "$SANDBOX_CLAUDE_D/01-git.md"
+}
+
+# Tells Claude that `~/.claude/skills/` and `~/.claude/projects/<slug>/memory/`
+# are host-mounted and persist across sandbox lifecycles. Without this note,
+# Claude would treat both as ephemeral sandbox state and not realise that
+# skills it authors or memory it writes will be available to its future
+# selves in fresh sandboxes.
+write_persistence_doc() {
+    local slug
+    slug="$(project_slug_for_path "$REPO_DIR")"
+    {
+        echo "# Persistent Claude state across sandboxes"
+        echo
+        echo "Two directories under \`~/.claude/\` are host-mounted and survive \`destroy create\`:"
+        echo
+        echo "- \`~/.claude/skills/\` — shared across **all** of this user's sandboxes (every project, every container). When the user asks you to remember a procedure or recipe (\"husk hvordan vi sætter en VM op\"), author a new skill there as \`<name>/SKILL.md\` with a precise \`description\` so it is loaded only when relevant. Skills are lazy-loaded by description match, so adding more does not bloat context."
+        echo "- \`~/.claude/projects/$slug/memory/\` — scoped to this project's host path. Auto-memory entries (\`MEMORY.md\` plus topic files) written here survive sandbox destruction and are loaded again in the next sandbox for the same project."
+        echo
+        echo "On the host these live at \`$CONFIG_DIR/skills/\` and \`$CONFIG_DIR/memory/$slug/\` respectively. The user edits or removes them there directly between sandbox lifecycles."
+    } | write_sandbox_user_file "$SANDBOX_CLAUDE_D/02-persistence.md"
 }
 
 write_port_doc() {
@@ -716,8 +745,13 @@ cmd_create() {
     echo "Mounting project directory at $REPO_DIR..."
     attach_map_mount "$REPO_DIR"
 
+    echo "Mounting persistent skills and memory directories..."
+    attach_claude_persistence_mounts
+
     echo "Starting sandbox..."
     incus start "$CONTAINER_NAME"
+
+    fix_claude_dir_ownership
 
     echo "Configuring claude-status-reporter (backend=$REPORTER_BACKEND)..."
     enable_reporter_for_ubuntu
@@ -745,6 +779,7 @@ cmd_create() {
     write_sandbox_claude_md_stub
     write_sandbox_environment_doc
     write_git_doc
+    write_persistence_doc
     write_map_doc "$(map_key_for_path "$REPO_DIR")" "$REPO_DIR" "primary"
 
     echo "Pre-accepting Claude Code first-run prompts (theme, onboarding, trust, bypass)..."
@@ -847,6 +882,49 @@ attach_map_mount() {
     incus config device add "$CONTAINER_NAME" "$dev_name" disk \
         source="$host_path" \
         path="$host_path" >/dev/null
+}
+
+# Mounts the two host-side directories that hold Claude state we want
+# to survive sandbox destruction: user skills (shared across every
+# sandbox) and per-project auto-memory. The in-sandbox target paths
+# are the exact locations Claude Code itself uses, so no shim or
+# config-file edit is needed — the mount makes the host dir appear at
+# the path Claude already scans. Creates the host dirs if missing.
+# Device-only — paired CLAUDE.d doc is written by write_persistence_doc
+# once the container is up.
+attach_claude_persistence_mounts() {
+    local skills_host="$CONFIG_DIR/skills"
+    local slug memory_host
+    slug="$(project_slug_for_path "$REPO_DIR")"
+    memory_host="$CONFIG_DIR/memory/$slug"
+
+    mkdir -p "$skills_host" "$memory_host"
+
+    incus config device remove "$CONTAINER_NAME" claude-skills 2>/dev/null || true
+    incus config device add "$CONTAINER_NAME" claude-skills disk \
+        source="$skills_host" \
+        path="/home/ubuntu/.claude/skills" >/dev/null
+
+    incus config device remove "$CONTAINER_NAME" claude-memory 2>/dev/null || true
+    incus config device add "$CONTAINER_NAME" claude-memory disk \
+        source="$memory_host" \
+        path="/home/ubuntu/.claude/projects/$slug/memory" >/dev/null
+}
+
+# Bind-mounting under `~/.claude/` causes Incus to auto-create the
+# parent directories (`.claude/`, `.claude/projects/`, `.claude/projects/<slug>/`)
+# as root when the container starts. That blocks subsequent file writes
+# as the unprivileged `ubuntu` user — including the CLAUDE.md stub and
+# the seeded settings.json. Hand the parent dirs back to ubuntu.
+# Non-recursive on purpose: the bind-mounted contents underneath
+# (skills/, memory/) keep their host ownership untouched.
+fix_claude_dir_ownership() {
+    local slug
+    slug="$(project_slug_for_path "$REPO_DIR")"
+    incus exec "$CONTAINER_NAME" -- chown ubuntu:ubuntu \
+        /home/ubuntu/.claude \
+        /home/ubuntu/.claude/projects \
+        "/home/ubuntu/.claude/projects/$slug"
 }
 
 # Attach + write the doc + echo. Use this from contexts where the
