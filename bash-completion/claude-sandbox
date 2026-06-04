@@ -1,10 +1,10 @@
 # bash completion for claude-sandbox
 #
 # Completes:
-#   - command names (create, auth, map, dev, expose, shell, yolo, info,
+#   - command names (create, auth, mount, dev, expose, shell, yolo, info,
 #     destroy, bases, rebuild-base, gc, help)
 #   - auth=<profile>  from ~/.claudes/*/
-#   - map=<path>      directories (comma-separated lists supported)
+#   - mount=<path>    directories (comma-separated lists supported)
 #   - dev=<port>      from /dev/ttyACM* and /dev/ttyUSB* (comma-separated)
 #
 # Commands chain on the same line; each token is completed independently.
@@ -21,7 +21,7 @@ _claude_sandbox() {
         prev="${COMP_WORDS[COMP_CWORD-1]:-}"
     fi
 
-    # For comma-separated values (dev=a,b  /  map=~/x,~/y), only the part
+    # For comma-separated values (dev=a,b  /  mount=~/x,~/y), only the part
     # after the last comma is the active fragment. Everything up to and
     # including that comma is a fixed prefix we re-attach to each match.
     local list_prefix="" frag="$cur"
@@ -55,7 +55,7 @@ _claude_sandbox() {
             done < <(compgen -W "${devs[*]}" -- "$frag")
             return
             ;;
-        map)
+        mount)
             # Directory completion, comma-aware. _filedir doesn't play
             # nicely with our list prefix, so we drive compgen directly.
             local m
@@ -75,7 +75,7 @@ _claude_sandbox() {
     esac
 
     # No = on the current token: complete a command name.
-    local commands="create auth map dev expose shell yolo info list destroy bases rebuild-base gc help"
+    local commands="create auth mount dev expose shell yolo info list destroy bases rebuild-base gc help"
     COMPREPLY=( $(compgen -W "$commands" -- "$cur") )
 }
 

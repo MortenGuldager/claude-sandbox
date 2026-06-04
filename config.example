@@ -14,7 +14,7 @@
 
 # Note: there is no SANDBOX_PROJECT_PATH setting. Host directories are
 # mounted at the same path inside the sandbox as on the host — `create`
-# mounts the cwd implicitly, and `map=<path>` adds more.
+# mounts the cwd implicitly, and `mount=<path>` adds more.
 
 # Note: `create` also auto-mounts two persistence directories so Claude
 # state survives sandbox destroy/create cycles, with no setting needed:

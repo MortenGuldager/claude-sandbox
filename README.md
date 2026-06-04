@@ -76,7 +76,7 @@ claude-sandbox create auth=mogul   # launches a container, mounts the cwd at
                                    # the same path inside, installs Claude
                                    # Code, starts the reporter, and writes
                                    # the auth token for profile `mogul`
-claude-sandbox map=~/Arduino/libraries  # (optional) extra host dir, same path inside
+claude-sandbox mount=~/Arduino/libraries  # (optional) extra host dir, same path inside
 claude-sandbox dev=ttyACM0   # (optional) pass a USB serial device through
 claude-sandbox expose=5173   # (optional) forward host 127.0.0.1:5173 -> container
 claude-sandbox shell         # drop into the sandbox as user `ubuntu`
@@ -146,17 +146,17 @@ sandbox (e.g. `cd ~/myproj && claude-sandbox create` mounts at
 `/home/ubuntu/myproj` on both sides). Symlinks in the cwd are
 followed: the mount target is the resolved real path.
 
-To mount additional host directories, use `map=<path>[,<path>...]`:
+To mount additional host directories, use `mount=<path>[,<path>...]`:
 
 ```sh
-claude-sandbox map=~/Arduino/libraries           # one extra dir
-claude-sandbox map=~/Arduino/libraries,/srv/data # multiple in one call
+claude-sandbox mount=~/Arduino/libraries           # one extra dir
+claude-sandbox mount=~/Arduino/libraries,/srv/data # multiple in one call
 ```
 
 Each path is realpath-resolved and mounted at that same path inside
 the sandbox. The same-path invariant means relative paths, `../`, and
 the agent's mental model of "where am I" all match between host and
-sandbox. Re-mapping the same path replaces the existing mount; mounts
+sandbox. Re-mounting the same path replaces the existing mount; mounts
 accumulate across calls.
 
 Paths outside `$HOME` are allowed but you're on the hook for not
@@ -255,13 +255,13 @@ depends on how the sandbox was launched lands as its own file there:
   sandboxes](#persistent-state-across-sandboxes)); the in-depth
   conventions live in the seeded `claude-sandbox` skill so they
   lazy-load on demand instead of bloating startup context.
-- `map-<hash>.md` — one per mounted host directory (the implicit cwd
-  mount and any `map=<path>` adds).
+- `mount-<hash>.md` — one per mounted host directory (the implicit cwd
+  mount and any `mount=<path>` adds).
 - `device-<port>.md` — one per `dev`-ed USB/serial device, with
   vendor/product IDs.
 - `port-<n>.md` — one per `expose`-ed network port.
 
-This way `map`, `dev`, and `expose` just drop a new file rather than
+This way `mount`, `dev`, and `expose` just drop a new file rather than
 rewriting one growing document, and Claude reads the directory at
 session start so it knows the resources it has available.
 
@@ -381,7 +381,7 @@ settings and their defaults. Highlights:
 | `REPORTER_BACKEND`       | `stdout`                      | One of: `none`, `stdout`, `file`, `mqtt`, `http`.                    |
 | `REPORTER_KEEPALIVE`     | `60`                          | Seconds between keep-alive reports (changes are sent immediately).   |
 
-The host cwd (and any extra `map=<path>` directories) are always
+The host cwd (and any extra `mount=<path>` directories) are always
 mounted at the same path inside the sandbox as on the host — there is
 no setting to override that.
 
@@ -412,18 +412,29 @@ To override which version is installed — pin to a SHA or test a fork —
 set `REPORTER_REPO` and/or `REPORTER_REF` in your config. The next
 `create` builds a fresh base image keyed off the new pin.
 
-## Migration: `map` semantics changed
+## Migration: command renames
 
-The `map` command used to pass through USB/serial devices, and the
-project mount was at a fixed `/home/ubuntu/project` inside the
-sandbox. Both changed:
+### `map=<path>` → `mount=<path>`
 
-- `map=<path>` now mounts host directories (at the same path inside).
-- `dev[=<port>]` is the new name for USB/serial passthrough.
+`map=` was too generic — directories, devices, and ports are all
+"mapped" into the sandbox. The directory-mount command is now
+`mount=<path>`; passing `map=` prints an error pointing at the new
+name. Re-running `mount=` on an existing sandbox transparently
+replaces any leftover `claude-map-<key>` device from before the
+rename, so no `destroy create` is required.
+
+### Older: `map` used to mean USB/serial
+
+Long ago, `map` passed through USB/serial devices, and the project
+mount was at a fixed `/home/ubuntu/project` inside the sandbox. Both
+changed:
+
+- `mount=<path>` mounts host directories (at the same path inside).
+- `dev[=<port>]` passes through USB/serial.
 - The host cwd is mounted at its real path inside the sandbox, not
   at `/home/ubuntu/project`. `SANDBOX_PROJECT_PATH` is gone.
 
-Existing sandboxes created before this change still have the old
+Existing sandboxes from before that older change still have the old
 `/home/ubuntu/project` mount and won't pick up the new layout. To
 upgrade, run `claude-sandbox destroy create` in the project
 directory. Any `map=ttyACM0`-style invocations in scripts or aliases

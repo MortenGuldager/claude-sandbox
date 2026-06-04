@@ -169,7 +169,7 @@ Examples:
   $(basename "$0") destroy create auth=mogul dev=ttyACM0 shell
   $(basename "$0") create auth=mogul dev=ttyUSB0,ttyACM0 shell  # multiple devices
   $(basename "$0") create auth=mogul dev shell                  # dev defaults to ttyACM0
-  $(basename "$0") create auth=mogul map=~/Arduino/libraries shell  # extra host dir
+  $(basename "$0") create auth=mogul mount=~/Arduino/libraries shell  # extra host dir
   $(basename "$0") create auth=mogul expose=5173 shell          # forward a dev-server port
 
 Commands:
@@ -189,11 +189,11 @@ Commands:
                        sandbox. Requires an existing container, so
                        typically chained after create:
                        \`create auth=mogul shell\`.
-  map=<path>[,<path>...]
+  mount=<path>[,<path>...]
                        Mount one or more extra host directories into
                        the sandbox at the same path as on the host.
                        Each path is realpath'd; symlinks are followed.
-                       Additive across calls; re-mapping the same path
+                       Additive across calls; re-mounting the same path
                        replaces the existing mount.
   dev[=<port>[,<port>...]]
                        Pass one or more USB/serial devices into the
@@ -211,7 +211,8 @@ Commands:
   yolo                 Launch Claude inside the sandbox straight away
                        with --dangerously-skip-permissions, skipping
                        the shell. Requires a running container.
-  info                 Show sandbox status and mounted devices.
+  info                 Show sandbox status, mounts, forwarded ports, and
+                       passthrough devices.
   list                 List all claude-sandbox containers on the host
                        with their auth profile and primary path.
   destroy              Delete the sandbox container (no-op if absent).
@@ -383,7 +384,7 @@ write_sandbox_environment_doc() {
         echo "# Sandbox"
         echo
         echo "- Container name: \`$CONTAINER_NAME\` (Incus, on the host)."
-        echo "- Host directories are mounted at the same path inside the sandbox as on the host (see the \`map-*.md\` files in this directory for the list). Anything outside a mapped directory lives only inside the container and disappears on \`destroy\`."
+        echo "- Host directories are mounted at the same path inside the sandbox as on the host (see the \`mount-*.md\` files in this directory for the list). Anything outside a mounted directory lives only inside the container and disappears on \`destroy\`."
         echo "- No SSH keys, GPG keys, or cloud credentials from the host are forwarded. Pushing to remotes is a host-side action — ask the user to run it."
         if [ -n "${RESOLVED_TZ-}" ]; then
             echo "- Container clock is set to **$RESOLVED_TZ**, matching the host."
@@ -402,7 +403,7 @@ write_device_doc() {
     } | write_sandbox_user_file "$SANDBOX_CLAUDE_D/device-$port_name.md"
 }
 
-write_map_doc() {
+write_mount_doc() {
     local key="$1" host_path="$2" role="$3"
     {
         echo "# Mounted host directory: \`$host_path\`"
@@ -412,19 +413,22 @@ write_map_doc() {
                 echo "- This is the project directory you invoked \`claude-sandbox\` from on the host."
                 ;;
             *)
-                echo "- Extra directory mapped in via \`claude-sandbox map=$host_path\`."
+                echo "- Extra directory mounted in via \`claude-sandbox mount=$host_path\`."
                 ;;
         esac
         echo "- Mounted read-write at the same path inside the sandbox as on the host. Relative paths and \`..\` work the same on both sides."
-        echo "- Changes persist on the host; everything outside any mapped directory lives only inside the container and disappears on \`destroy\`."
-    } | write_sandbox_user_file "$SANDBOX_CLAUDE_D/map-$key.md"
+        echo "- Changes persist on the host; everything outside any mounted directory lives only inside the container and disappears on \`destroy\`."
+    } | write_sandbox_user_file "$SANDBOX_CLAUDE_D/mount-$key.md"
+    # Migration: drop the pre-rename doc filename if it survived from
+    # before `map=` became `mount=`.
+    incus exec "$CONTAINER_NAME" -- sudo -u ubuntu rm -f "$SANDBOX_CLAUDE_D/map-$key.md"
 }
 
 # Derives a stable, short, Incus-safe key from an absolute host path.
-# Used both for the Incus device name (`claude-map-<key>`) and the
-# per-mount CLAUDE.d filename (`map-<key>.md`) so a remap of the same
-# path is naturally idempotent.
-map_key_for_path() {
+# Used both for the Incus device name (`claude-mount-<key>`) and the
+# per-mount CLAUDE.d filename (`mount-<key>.md`) so re-mounting the
+# same path is naturally idempotent.
+mount_key_for_path() {
     printf '%s' "$1" | md5sum | cut -c1-10
 }
 
@@ -746,7 +750,7 @@ cmd_create() {
     [ -n "$SANDBOX_CPU" ]         && incus config set "$CONTAINER_NAME" limits.cpu   "$SANDBOX_CPU"
 
     echo "Mounting project directory at $REPO_DIR..."
-    attach_map_mount "$REPO_DIR"
+    attach_mount "$REPO_DIR"
 
     echo "Mounting persistent skills and memory directories..."
     attach_claude_persistence_mounts
@@ -783,7 +787,7 @@ cmd_create() {
     write_sandbox_environment_doc
     write_git_doc
     write_persistence_doc
-    write_map_doc "$(map_key_for_path "$REPO_DIR")" "$REPO_DIR" "primary"
+    write_mount_doc "$(mount_key_for_path "$REPO_DIR")" "$REPO_DIR" "primary"
 
     echo "Pre-accepting Claude Code first-run prompts (theme, onboarding, trust, bypass)..."
     seed_claude_first_run_state
@@ -873,15 +877,18 @@ cmd_dev() {
 # path inside the sandbox. Device-only — does not write the CLAUDE.d
 # doc, so this is safe to call before `incus start` (where `incus
 # exec` would fail). Caller is responsible for resolving and
-# validating the host path, and for arranging that write_map_doc runs
+# validating the host path, and for arranging that write_mount_doc runs
 # once the container is up.
-attach_map_mount() {
+attach_mount() {
     local host_path="$1"
     local key dev_name
-    key="$(map_key_for_path "$host_path")"
-    dev_name="claude-map-$key"
+    key="$(mount_key_for_path "$host_path")"
+    dev_name="claude-mount-$key"
 
     incus config device remove "$CONTAINER_NAME" "$dev_name" 2>/dev/null || true
+    # Migration: drop the pre-rename device name if it lingers on a
+    # sandbox created before `map=` became `mount=`.
+    incus config device remove "$CONTAINER_NAME" "claude-map-$key" 2>/dev/null || true
     incus config device add "$CONTAINER_NAME" "$dev_name" disk \
         source="$host_path" \
         path="$host_path" >/dev/null
@@ -1012,21 +1019,21 @@ fix_claude_dir_ownership() {
 }
 
 # Attach + write the doc + echo. Use this from contexts where the
-# container is already running (e.g. cmd_map). cmd_create attaches
-# before start and writes the doc afterwards via write_map_doc.
+# container is already running (e.g. cmd_mount). cmd_create attaches
+# before start and writes the doc afterwards via write_mount_doc.
 add_map_mount() {
     local host_path="$1" role="$2"
-    attach_map_mount "$host_path"
-    write_map_doc "$(map_key_for_path "$host_path")" "$host_path" "$role"
+    attach_mount "$host_path"
+    write_mount_doc "$(mount_key_for_path "$host_path")" "$host_path" "$role"
     echo "Directory mounted: $host_path"
 }
 
 # Mounts one or more host directories at the same path inside the
-# sandbox. Comma-separated list so `map=~/a,~/b` adds both in one call.
+# sandbox. Comma-separated list so `mount=~/a,~/b` adds both in one call.
 # Each path is realpath'd (so a symlinked argument lands at its true
-# location) and must already exist on the host. Re-mapping a path is
+# location) and must already exist on the host. Re-mounting a path is
 # idempotent — it replaces the existing Incus device.
-cmd_map() {
+cmd_mount() {
     require_container
     local arg="$1"
 
@@ -1038,8 +1045,8 @@ cmd_map() {
         raw="${raw## }"
         raw="${raw%% }"
         [ -z "$raw" ] && continue
-        # Tilde-expand defensively. Bash usually expands `map=~/foo` at
-        # the call site, but quoting (`'map=~/foo'`) suppresses that,
+        # Tilde-expand defensively. Bash usually expands `mount=~/foo` at
+        # the call site, but quoting (`'mount=~/foo'`) suppresses that,
         # and a config-driven invocation can also arrive un-expanded.
         case "$raw" in
             "~")    expanded="$HOME" ;;
@@ -1048,12 +1055,12 @@ cmd_map() {
         esac
         if [ ! -e "$expanded" ]; then
             IFS="$old_ifs"
-            echo "map: host path '$expanded' does not exist." >&2
+            echo "mount: host path '$expanded' does not exist." >&2
             exit 1
         fi
         if [ ! -d "$expanded" ]; then
             IFS="$old_ifs"
-            echo "map: host path '$expanded' is not a directory." >&2
+            echo "mount: host path '$expanded' is not a directory." >&2
             exit 1
         fi
         resolved="$(realpath "$expanded")"
@@ -1201,10 +1208,69 @@ cmd_info() {
         || [ "$cur_cpu" != "$SANDBOX_CPU" ]; then
         echo "             (sandbox limits differ from config; 'destroy create' to recreate, or 'incus config set $CONTAINER_NAME limits.<key> <val>' to patch in place)"
     fi
+    # Bucket devices by type so mounts (disk), forwarded ports (proxy),
+    # and hardware passthrough (usb / unix-char) each get their own
+    # section. One awk pass over `incus config show --expanded` emits
+    # tab-separated records; each section filters and formats from there.
+    local devices
+    devices="$(incus config show "$CONTAINER_NAME" --expanded | awk '
+        /^devices:/                 { in_dev=1; next }
+        in_dev && /^[^[:space:]]/   { in_dev=0 }
+        !in_dev                     { next }
+        /^  [^[:space:]].*:[[:space:]]*$/ {
+            if (name) print type "\t" name "\t" source "\t" path "\t" listen "\t" connect "\t" vendor "\t" product
+            name=$1; sub(":","",name)
+            type=""; source=""; path=""; listen=""; connect=""; vendor=""; product=""
+            next
+        }
+        /^    [^[:space:]]+:/ {
+            key=$1; sub(":","",key)
+            val=$2; for(i=3;i<=NF;i++) val=val " " $i
+            gsub(/^"|"$/, "", val)
+            if      (key=="type")      type=val
+            else if (key=="source")    source=val
+            else if (key=="path")      path=val
+            else if (key=="listen")    listen=val
+            else if (key=="connect")   connect=val
+            else if (key=="vendorid")  vendor=val
+            else if (key=="productid") product=val
+        }
+        END { if (name) print type "\t" name "\t" source "\t" path "\t" listen "\t" connect "\t" vendor "\t" product }
+    ')"
+
+    echo
+    echo "Mounts (host -> container):"
+    local mounts
+    mounts="$(awk -F'\t' '$1=="disk" && $3 != "" { print "  " $3 "  ->  " $4 }' <<< "$devices" | sort)"
+    if [ -z "$mounts" ]; then
+        echo "  (none)"
+    else
+        echo "$mounts"
+    fi
+
+    echo
+    echo "Ports (host -> container):"
+    local ports
+    ports="$(awk -F'\t' '$1=="proxy" { print "  " $5 "  ->  " $6 }' <<< "$devices" \
+        | sed 's|tcp:||g' | sort -t: -k2 -n)"
+    if [ -z "$ports" ]; then
+        echo "  (none — use 'expose=PORT' to forward one)"
+    else
+        echo "$ports"
+    fi
+
     echo
     echo "Devices:"
-    incus config show "$CONTAINER_NAME" --expanded | \
-        grep -E "^\s+(source|path):" | sed -E 's/^[[:space:]]+/  /'
+    local hw
+    hw="$(awk -F'\t' '
+        $1=="usb"        { print "  usb " $2 "  vendor=" $7 " product=" $8 }
+        $1=="unix-char"  { print "  unix-char " $2 "  " $4 }
+    ' <<< "$devices" | sort)"
+    if [ -z "$hw" ]; then
+        echo "  (none)"
+    else
+        echo "$hw"
+    fi
 }
 
 cmd_list() {
@@ -1380,11 +1446,15 @@ for token in "$@"; do
                 exit 1
             fi
             ;;
-        map)
+        mount)
             if [ "$TOKEN_HAS_ARG" -ne 1 ] || [ -z "$TOKEN_ARG" ]; then
-                echo "Command 'map' requires an argument, e.g. map=~/Arduino/libraries" >&2
+                echo "Command 'mount' requires an argument, e.g. mount=~/Arduino/libraries" >&2
                 exit 1
             fi
+            ;;
+        map)
+            echo "Command 'map' was renamed to 'mount' — use 'mount=$TOKEN_ARG' instead." >&2
+            exit 1
             ;;
         expose)
             if [ "$TOKEN_HAS_ARG" -ne 1 ] || [ -z "$TOKEN_ARG" ]; then
@@ -1405,7 +1475,7 @@ for token in "$@"; do
     case "$TOKEN_CMD" in
         create)         cmd_create ;;
         auth)           cmd_auth "$TOKEN_ARG" ;;
-        map)            cmd_map "$TOKEN_ARG" ;;
+        mount)          cmd_mount "$TOKEN_ARG" ;;
         dev)            cmd_dev "$TOKEN_ARG" ;;
         expose)         cmd_expose "$TOKEN_ARG" ;;
         shell)          cmd_shell ;;
