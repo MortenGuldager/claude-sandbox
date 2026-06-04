@@ -215,6 +215,10 @@ Commands:
                        passthrough devices.
   list                 List all claude-sandbox containers on the host
                        with their auth profile and primary path.
+  start                Start a stopped sandbox (no-op if already running).
+  stop                 Stop a running sandbox, preserving its disk state
+                       so a later \`start\` resumes it (no-op if already
+                       stopped). Use \`destroy\` to also wipe disk.
   destroy              Delete the sandbox container (no-op if absent).
   bases                List cached base images with age and status.
   rebuild-base         Force a rebuild of the current base image.
@@ -1173,6 +1177,42 @@ cmd_yolo() {
         bash -c "cd $quoted 2>/dev/null || cd ~; exec bash -ic 'exec claude --dangerously-skip-permissions'"
 }
 
+# Format a byte count as a compact IEC string (e.g. 1.4G). Empty,
+# non-numeric, or negative input (our sentinel for "unknown") prints "-".
+human_bytes() {
+    local b="$1"
+    if [ -z "$b" ] || ! [ "$b" -ge 0 ] 2>/dev/null; then
+        echo "-"
+        return
+    fi
+    numfmt --to=iec "$b" 2>/dev/null || echo "$b"
+}
+
+# Disk usage of a sandbox's root, in bytes, or -1 if unknown. Incus only
+# populates state.disk.root.usage on quota-aware storage drivers (zfs,
+# btrfs, lvm); on the `dir` driver it is absent, so callers that want a
+# number there must fall back to `du` inside the container.
+disk_usage_bytes() {
+    incus list "$1" --format json 2>/dev/null \
+        | jq -r '.[0].state.disk.root.usage // -1'
+}
+
+# Human-readable root disk usage, given a sandbox's name, status, and the
+# storage driver's usage stat in bytes (-1 if the driver has none). Prefers
+# the stat; on the dir driver falls back to `du` inside a running container
+# (-x keeps it on the root fs, excluding host mounts). Stopped + no stat -> "-".
+disk_human() {
+    local name="$1" status="$2" bytes="$3" d
+    if [ "$bytes" -ge 0 ] 2>/dev/null; then
+        human_bytes "$bytes"
+    elif [ "${status^^}" = "RUNNING" ]; then
+        d="$(incus exec "$name" -- du -shx / 2>/dev/null </dev/null | awk '{print $1}')"
+        echo "${d:--}"
+    else
+        echo "-"
+    fi
+}
+
 cmd_info() {
     if ! container_exists "$CONTAINER_NAME"; then
         echo "No sandbox found for this directory."
@@ -1186,9 +1226,12 @@ cmd_info() {
     cur_mem="$(incus config get "$CONTAINER_NAME" limits.memory)"
     cur_swap="$(incus config get "$CONTAINER_NAME" raw.lxc | sed -n 's/^lxc\.cgroup2\.memory\.swap\.max=//p')"
     cur_cpu="$(incus config get "$CONTAINER_NAME" limits.cpu)"
+    local disk_disp
+    disk_disp="$(disk_human "$CONTAINER_NAME" "$status" "$(disk_usage_bytes "$CONTAINER_NAME")")"
     echo "Sandbox info:"
     echo "  Name:      $CONTAINER_NAME"
     echo "  Status:    $status"
+    echo "  Disk:      $disk_disp"
     echo "  Repo:      $mapped"
     echo "  Auth:      ${auth_profile:-<not set>}"
     echo "  Reporter:  $REPORTER_BACKEND"
@@ -1286,6 +1329,7 @@ cmd_list() {
             .name,
             .status,
             (.config["user.meta.auth-profile"] // "-"),
+            (.state.disk.root.usage // -1),
             (.config["user.meta.hostpath"] // "-")
           ]
         | @tsv
@@ -1296,11 +1340,39 @@ cmd_list() {
         return 0
     fi
 
-    printf '  %-32s %-9s %-12s %s\n' "NAME" "STATUS" "AUTH" "PATH"
-    local name status auth path
-    while IFS=$'\t' read -r name status auth path; do
-        printf '  %-32s %-9s %-12s %s\n' "$name" "$status" "$auth" "$path"
+    # DISK comes from the storage driver's stat; on the dir driver (no stat)
+    # we `du` inside each running container — cheap at a handful of sandboxes.
+    # Stopped containers without a stat show "-".
+    printf '  %-32s %-9s %-12s %-7s %s\n' "NAME" "STATUS" "AUTH" "DISK" "PATH"
+    local name status auth disk path
+    while IFS=$'\t' read -r name status auth disk path; do
+        printf '  %-32s %-9s %-12s %-7s %s\n' \
+            "$name" "$status" "$auth" "$(disk_human "$name" "$status" "$disk")" "$path"
     done <<< "$rows"
+}
+
+cmd_start() {
+    require_container
+    local status
+    status="$(incus info "$CONTAINER_NAME" | awk '/^Status/{print $2}')"
+    if [ "$status" = "RUNNING" ]; then
+        echo "Sandbox '$CONTAINER_NAME' is already running."
+        return 0
+    fi
+    echo "Starting $CONTAINER_NAME..."
+    incus start "$CONTAINER_NAME"
+}
+
+cmd_stop() {
+    require_container
+    local status
+    status="$(incus info "$CONTAINER_NAME" | awk '/^Status/{print $2}')"
+    if [ "$status" = "STOPPED" ]; then
+        echo "Sandbox '$CONTAINER_NAME' is already stopped."
+        return 0
+    fi
+    echo "Stopping $CONTAINER_NAME..."
+    incus stop "$CONTAINER_NAME"
 }
 
 cmd_destroy() {
@@ -1432,7 +1504,7 @@ split_token() {
 for token in "$@"; do
     split_token "$token"
     case "$TOKEN_CMD" in
-        create|shell|yolo|info|list|destroy|bases|rebuild-base|gc|help|-h|--help)
+        create|shell|yolo|info|list|start|stop|destroy|bases|rebuild-base|gc|help|-h|--help)
             if [ "$TOKEN_HAS_ARG" -eq 1 ]; then
                 echo "Command '$TOKEN_CMD' takes no argument; got '$token'" >&2
                 exit 1
@@ -1482,6 +1554,8 @@ for token in "$@"; do
         yolo)           cmd_yolo ;;
         info)           cmd_info ;;
         list)           cmd_list ;;
+        start)          cmd_start ;;
+        stop)           cmd_stop ;;
         destroy)        cmd_destroy ;;
         bases)          cmd_bases ;;
         rebuild-base)   cmd_rebuild_base ;;

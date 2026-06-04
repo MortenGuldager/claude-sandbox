@@ -82,7 +82,9 @@ claude-sandbox expose=5173   # (optional) forward host 127.0.0.1:5173 -> contain
 claude-sandbox shell         # drop into the sandbox as user `ubuntu`
 claude-sandbox yolo          # ...or launch Claude in the sandbox directly
 # ... work ...
-claude-sandbox destroy       # nuke the container
+claude-sandbox stop          # pause the container (keeps disk state)
+claude-sandbox start         # resume it later
+claude-sandbox destroy       # ...or nuke the container entirely
 ```
 
 Commands chain — `claude-sandbox destroy create auth=mogul dev=ttyACM0 shell`
