@@ -115,6 +115,19 @@ host-side `claude` CLI via `CLAUDE_CONFIG_DIR`:
 alias claude-mogul='CLAUDE_CONFIG_DIR=/home/you/.claudes/mogul claude'
 ```
 
+To mint and stash that token without hand-editing the file:
+
+```sh
+claude-sandbox setup-token=mogul
+```
+
+This is a one-time host-side step. It tells you to run `claude
+setup-token` in another terminal, then prompts you to paste the token
+back. It refuses to overwrite an existing token without confirmation
+and touches no container. Re-running it later just gives you a fresh
+token in the same slot — note that whether the previous token is
+invalidated is up to Anthropic's side of the flow, not us.
+
 Pick which profile a sandbox uses with `auth=<name>`:
 
 ```sh

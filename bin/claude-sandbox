@@ -165,6 +165,7 @@ Usage: $(basename "$0") <command>[=<arg>] [<command>[=<arg>]...]
 Commands run in the given order. The chain aborts on the first failure.
 
 Examples:
+  $(basename "$0") setup-token=mogul                            # one-time: mint and store a token
   $(basename "$0") create auth=mogul shell
   $(basename "$0") destroy create auth=mogul dev=ttyACM0 shell
   $(basename "$0") create auth=mogul dev=ttyUSB0,ttyACM0 shell  # multiple devices
@@ -189,6 +190,13 @@ Commands:
                        sandbox. Requires an existing container, so
                        typically chained after create:
                        \`create auth=mogul shell\`.
+  setup-token=<profile>
+                       Host-side one-time setup: prompts you to run
+                       \`claude setup-token\` yourself and paste the
+                       resulting token, then stores it at
+                       ~/.claudes/<profile>/sandbox-auth so \`auth=\`
+                       can pick it up. Refuses to overwrite an existing
+                       token without confirmation. Touches no container.
   mount=<path>[,<path>...]
                        Mount one or more extra host directories into
                        the sandbox at the same path as on the host.
@@ -807,6 +815,71 @@ cmd_auth() {
     write_auth_token_to_container
     incus config set "$CONTAINER_NAME" user.meta.auth-profile "$profile"
     echo "Token updated. New shells will pick it up."
+}
+
+# Host-side: prompt the user for a token (produced by `claude setup-token`
+# in another terminal) and write it to ~/.claudes/<profile>/sandbox-auth
+# where `auth=<profile>` reads from. Fully manual capture — we do not
+# spawn `claude setup-token` ourselves, because its interactive output is
+# not stable enough to scrape reliably, and because we have not verified
+# whether re-running it invalidates prior tokens. Keeping the human in
+# the loop sidesteps both issues.
+cmd_setup_token() {
+    local profile="$1"
+    case "$profile" in
+        */*|.|..)
+            echo "Profile name '$profile' must be a single path segment." >&2
+            exit 1
+            ;;
+    esac
+
+    local dir="$HOME/.claudes/$profile"
+    local path="$dir/sandbox-auth"
+
+    if [ -f "$path" ]; then
+        echo "A token already exists at $path." >&2
+        printf "Overwrite it? [y/N] " >&2
+        local reply=""
+        IFS= read -r reply </dev/tty || true
+        case "$reply" in
+            [yY]|[yY][eE][sS]) ;;
+            *) echo "Aborted; existing token left in place." >&2; exit 1 ;;
+        esac
+    fi
+
+    cat >&2 <<EOF
+
+To mint a token, run this on the host (not in a sandbox):
+
+    claude setup-token
+
+It prints a URL — open it in a browser, log in, paste the verification
+code back, and it will print a long-lived token. Paste that token here.
+
+EOF
+
+    printf "Token: " >&2
+    local token=""
+    IFS= read -r token </dev/tty || true
+    token="$(printf '%s' "$token" | tr -d '[:space:]')"
+    if [ -z "$token" ]; then
+        echo "No token entered; aborting." >&2
+        exit 1
+    fi
+
+    mkdir -p "$dir"
+    chmod 700 "$dir"
+    # Write to a sibling tmp file and rename, so a Ctrl-C mid-write
+    # cannot leave a half-truncated token in place of a previously
+    # working one.
+    local tmp
+    tmp="$(mktemp "$dir/sandbox-auth.XXXXXX")"
+    printf '%s\n' "$token" > "$tmp"
+    chmod 600 "$tmp"
+    mv "$tmp" "$path"
+
+    echo "Token written to $path"
+    echo "Use it with:  $(basename "$0") create auth=$profile shell"
 }
 
 cmd_dev() {
@@ -1518,6 +1591,12 @@ for token in "$@"; do
                 exit 1
             fi
             ;;
+        setup-token)
+            if [ "$TOKEN_HAS_ARG" -ne 1 ] || [ -z "$TOKEN_ARG" ]; then
+                echo "Command 'setup-token' requires a profile, e.g. setup-token=mogul" >&2
+                exit 1
+            fi
+            ;;
         mount)
             if [ "$TOKEN_HAS_ARG" -ne 1 ] || [ -z "$TOKEN_ARG" ]; then
                 echo "Command 'mount' requires an argument, e.g. mount=~/Arduino/libraries" >&2
@@ -1547,6 +1626,7 @@ for token in "$@"; do
     case "$TOKEN_CMD" in
         create)         cmd_create ;;
         auth)           cmd_auth "$TOKEN_ARG" ;;
+        setup-token)    cmd_setup_token "$TOKEN_ARG" ;;
         mount)          cmd_mount "$TOKEN_ARG" ;;
         dev)            cmd_dev "$TOKEN_ARG" ;;
         expose)         cmd_expose "$TOKEN_ARG" ;;

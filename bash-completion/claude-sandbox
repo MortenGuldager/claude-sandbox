@@ -1,11 +1,13 @@
 # bash completion for claude-sandbox
 #
 # Completes:
-#   - command names (create, auth, mount, dev, expose, shell, yolo, info,
-#     list, start, stop, destroy, bases, rebuild-base, gc, help)
-#   - auth=<profile>  from ~/.claudes/*/
-#   - mount=<path>    directories (comma-separated lists supported)
-#   - dev=<port>      from /dev/ttyACM* and /dev/ttyUSB* (comma-separated)
+#   - command names (create, auth, setup-token, mount, dev, expose, shell,
+#     yolo, info, list, start, stop, destroy, bases, rebuild-base, gc, help)
+#   - auth=<profile>         from ~/.claudes/*/
+#   - setup-token=<profile>  from ~/.claudes/*/ (existing profiles only;
+#                            new names are typed literally)
+#   - mount=<path>           directories (comma-separated lists supported)
+#   - dev=<port>             from /dev/ttyACM* and /dev/ttyUSB* (comma-separated)
 #
 # Commands chain on the same line; each token is completed independently.
 
@@ -31,7 +33,7 @@ _claude_sandbox() {
     fi
 
     case "$prev" in
-        auth)
+        auth|setup-token)
             local profiles=() p
             if [ -d "$HOME/.claudes" ]; then
                 for p in "$HOME"/.claudes/*/; do
@@ -75,7 +77,7 @@ _claude_sandbox() {
     esac
 
     # No = on the current token: complete a command name.
-    local commands="create auth mount dev expose shell yolo info list start stop destroy bases rebuild-base gc help"
+    local commands="create auth setup-token mount dev expose shell yolo info list start stop destroy bases rebuild-base gc help"
     COMPREPLY=( $(compgen -W "$commands" -- "$cur") )
 }
 
