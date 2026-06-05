@@ -38,9 +38,16 @@ lives in its own repo —
 
 On the host:
 
-- [Incus](https://linuxcontainers.org/incus/docs/main/installing/)
+- Ubuntu 24.04+ / Debian 13+ (older distros need a manual
+  [Incus](https://linuxcontainers.org/incus/docs/main/installing/)
+  install via the Zabbly repo)
 - `bash`, `curl`, `jq`, `udevadm`, `md5sum`, `sha256sum` (all standard
   on most distros)
+
+`install.sh` brings up Incus on a fresh host: `apt install incus`,
+`incus admin init --minimal`, and adds the invoking user (`$SUDO_USER`)
+to the `incus-admin` group. Each step is skipped if already done, so
+re-running on a configured host is a no-op.
 
 The first `create` builds a cached base image with Node.js, Claude
 Code, and the reporter (fetched from

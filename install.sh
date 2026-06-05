@@ -19,6 +19,49 @@ if [ "${EUID:-$(id -u)}" -ne 0 ]; then
     exit 1
 fi
 
+# --- Incus prerequisites ----------------------------------------------------
+# csb is a thin wrapper over `incus`, so a fresh host needs three things
+# in place before csb is useful: the incus package itself, an initialized
+# default storage pool/network, and the invoking user added to the
+# incus-admin group. We handle each idempotently so re-running install.sh
+# on an already-configured host is a no-op.
+
+ADDED_TO_GROUP=""
+
+if ! command -v incus >/dev/null 2>&1; then
+    echo "Incus not found; installing via apt..."
+    if ! command -v apt-get >/dev/null 2>&1; then
+        echo "  apt-get is unavailable; install incus manually and re-run." >&2
+        exit 1
+    fi
+    apt-get update
+    apt-get install -y incus
+fi
+
+# An initialized incus has at least one storage pool. Empty output means
+# we have never run `incus admin init` (or any equivalent) on this host.
+if ! incus storage list --format csv 2>/dev/null | grep -q .; then
+    echo "Initializing incus (incus admin init --minimal)..."
+    incus admin init --minimal
+fi
+
+# Add the invoking user to incus-admin so they can talk to the daemon
+# without sudo. SUDO_USER is empty when install.sh is run as a real root
+# login, in which case we can't guess who the operator is.
+target_user="${SUDO_USER:-}"
+if [ -n "$target_user" ]; then
+    if ! id -nG "$target_user" 2>/dev/null | tr ' ' '\n' | grep -qx incus-admin; then
+        echo "Adding $target_user to incus-admin group..."
+        usermod -aG incus-admin "$target_user"
+        ADDED_TO_GROUP="$target_user"
+    fi
+else
+    echo "Note: not invoked via sudo; skipping incus-admin group add."
+    echo "      Add yourself manually:  sudo usermod -aG incus-admin <you>"
+fi
+
+# --- claude-sandbox files ---------------------------------------------------
+
 SOURCE="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 
 echo "Installing claude-sandbox to $PREFIX"
@@ -65,3 +108,12 @@ Defaults work without a config file. To customize, copy the example:
     cp $PREFIX/config.example ~/.config/claude-sandbox/config
 
 EOF
+
+if [ -n "$ADDED_TO_GROUP" ]; then
+    cat <<EOF
+Note: $ADDED_TO_GROUP was just added to the incus-admin group. The new
+membership won't apply to existing shells — log out and back in, or run
+'newgrp incus-admin' in a new shell, before using csb.
+
+EOF
+fi
