@@ -1290,6 +1290,43 @@ disk_human() {
     fi
 }
 
+# Live activity summary for a sandbox: what's attached right now. Both
+# `csb shell` and `csb yolo` attach via `sudo --login --user ubuntu`, so
+# each open session shows up as an ubuntu logind session; a running Claude
+# additionally shows up as a `claude` process. We treat the claude sessions
+# as the ones holding a `claude` process and the rest as plain shells, and
+# render "claude", "shell", "claude+shell", "shell ×N", or "-". The
+# always-on status reporter runs as a systemd service, not a login, so it
+# never inflates the count. Non-running or unreachable containers show "-".
+session_summary() {
+    local name="$1" status="$2" out s c shells label sh
+    if [ "${status^^}" != "RUNNING" ]; then
+        echo "-"
+        return
+    fi
+    out="$(incus exec "$name" -- bash -c '
+        s=$(loginctl --no-legend list-sessions 2>/dev/null | grep -wc ubuntu)
+        c=$(pgrep -xc claude 2>/dev/null)
+        printf "%s %s\n" "${s:-0}" "${c:-0}"
+    ' 2>/dev/null </dev/null)"
+    read -r s c <<< "$out"
+    [ -n "$s" ] || s=0
+    [ -n "$c" ] || c=0
+    shells=$(( s - c ))
+    (( shells < 0 )) && shells=0
+    label=""
+    if (( c > 0 )); then
+        label="claude"
+        (( c > 1 )) && label="claude ×$c"
+    fi
+    if (( shells > 0 )); then
+        sh="shell"
+        (( shells > 1 )) && sh="shell ×$shells"
+        label="${label:+$label+}$sh"
+    fi
+    echo "${label:--}"
+}
+
 cmd_info() {
     if ! container_exists "$CONTAINER_NAME"; then
         echo "No sandbox found for this directory."
@@ -1420,11 +1457,13 @@ cmd_list() {
     # DISK comes from the storage driver's stat; on the dir driver (no stat)
     # we `du` inside each running container — cheap at a handful of sandboxes.
     # Stopped containers without a stat show "-".
-    printf '  %-32s %-9s %-12s %-7s %s\n' "NAME" "STATUS" "AUTH" "DISK" "PATH"
+    printf '  %-32s %-9s %-13s %-12s %-7s %s\n' \
+        "NAME" "STATUS" "SESSION" "AUTH" "DISK" "PATH"
     local name status auth disk path
     while IFS=$'\t' read -r name status auth disk path; do
-        printf '  %-32s %-9s %-12s %-7s %s\n' \
-            "$name" "$status" "$auth" "$(disk_human "$name" "$status" "$disk")" "$path"
+        printf '  %-32s %-9s %-13s %-12s %-7s %s\n' \
+            "$name" "$status" "$(session_summary "$name" "$status")" \
+            "$auth" "$(disk_human "$name" "$status" "$disk")" "$path"
     done <<< "$rows"
 }
 
