@@ -358,6 +358,39 @@ write_timezone_to_container() {
         incus exec "$CONTAINER_NAME" -- tee /etc/timezone > /dev/null
 }
 
+# Resolves the host's DNS search domain(s) for forwarding. The sandbox's
+# eth0 only gets Incus's `incus` domain, so bare hostnames that resolve
+# on the host via its search suffix (e.g. `foo` -> `foo.lan`) fail inside
+# the sandbox. We read the `search` line from the host's /etc/resolv.conf
+# — present and authoritative on every Linux host, and on systemd-resolved
+# hosts it already excludes routing-only (~) domains. The container's own
+# `incus` domain is dropped so we don't duplicate it.
+resolve_host_dns_search() {
+    RESOLVED_DNS_SEARCH=""
+    local raw d domains=""
+    raw="$(awk '/^search[ \t]/ { $1=""; print; exit }' /etc/resolv.conf 2>/dev/null || true)"
+    for d in $raw; do
+        [ "$d" = "incus" ] && continue
+        [ "$d" = "." ] && continue
+        domains="${domains:+$domains }$d"
+    done
+    RESOLVED_DNS_SEARCH="$domains"
+    [ -n "$RESOLVED_DNS_SEARCH" ]
+}
+
+# Adds the host's search domain(s) as global resolved search domains via
+# a drop-in. The eth0 link keeps `incus`, so the container's resolv.conf
+# lists the host domains first, then `incus`. DNS *servers* are left as
+# Incus's resolver, which forwards unknown queries to the host's upstream
+# — so once the suffix is present, host LAN names resolve through it.
+write_dns_search_to_container() {
+    incus exec "$CONTAINER_NAME" -- mkdir -p /etc/systemd/resolved.conf.d
+    printf '[Resolve]\nDomains=%s\n' "$RESOLVED_DNS_SEARCH" | \
+        incus exec "$CONTAINER_NAME" -- \
+        tee /etc/systemd/resolved.conf.d/claude-sandbox-search.conf > /dev/null
+    incus exec "$CONTAINER_NAME" -- systemctl restart systemd-resolved
+}
+
 # Paths inside the sandbox where we keep environment notes for Claude.
 # The top-level CLAUDE.md is a tiny stub that points at CLAUDE.d/; the
 # per-aspect files (00-sandbox.md, device-<port>.md, port-<n>.md) are
@@ -400,6 +433,9 @@ write_sandbox_environment_doc() {
         echo "- No SSH keys, GPG keys, or cloud credentials from the host are forwarded. Pushing to remotes is a host-side action — ask the user to run it."
         if [ -n "${RESOLVED_TZ-}" ]; then
             echo "- Container clock is set to **$RESOLVED_TZ**, matching the host."
+        fi
+        if [ -n "${RESOLVED_DNS_SEARCH-}" ]; then
+            echo "- DNS search domain is **$RESOLVED_DNS_SEARCH** (forwarded from the host), with Incus's \`incus\` domain appended. Bare hostnames resolve via the host's upstream DNS through the Incus resolver."
         fi
     } | write_sandbox_user_file "$SANDBOX_CLAUDE_D/00-sandbox.md"
 }
@@ -796,6 +832,16 @@ cmd_create() {
         write_timezone_to_container || true
     else
         echo "Note: could not resolve host timezone; container clock stays at UTC." >&2
+    fi
+
+    # DNS search domain is resolved before the environment doc so the doc
+    # can report it. On failure $RESOLVED_DNS_SEARCH stays empty and the
+    # doc omits the line; the sandbox keeps just Incus's `incus` domain.
+    if resolve_host_dns_search; then
+        echo "Forwarding DNS search domain: $RESOLVED_DNS_SEARCH"
+        write_dns_search_to_container || true
+    else
+        echo "Note: host has no DNS search domain to forward; sandbox uses 'incus' only." >&2
     fi
 
     echo "Writing sandbox environment notes to $SANDBOX_CLAUDE_MD..."
