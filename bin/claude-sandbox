@@ -745,6 +745,19 @@ build_base_image() {
     echo "export CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1" | \
         incus exec "$BUILD_CONTAINER" -- sudo -u ubuntu tee -a /home/ubuntu/.bashrc > /dev/null
 
+    # The Incus bridge hands every container a ULA IPv6 address and a default
+    # IPv6 route, but the host's uplink has no working IPv6. Apps then prefer
+    # AAAA / try IPv6 first and stall on connect timeouts before falling back
+    # to IPv4. Disable IPv6 on the external NIC (and any future NIC) so the
+    # container has no global IPv6 source address — getaddrinfo() with
+    # AI_ADDRCONFIG then stops returning AAAA and apps go straight to IPv4.
+    # Loopback (::1) is left enabled so local IPv6-only services still work.
+    echo "  Disabling IPv6 in the sandbox (no working IPv6 uplink)..."
+    incus exec "$BUILD_CONTAINER" -- tee /etc/sysctl.d/99-disable-ipv6.conf > /dev/null <<'SYSCTL'
+net.ipv6.conf.eth0.disable_ipv6 = 1
+net.ipv6.conf.default.disable_ipv6 = 1
+SYSCTL
+
     # Fetch the status reporter from its own repo. The resolved SHA was
     # baked into BASE_HASH already, so the cached base image is keyed off
     # the exact content we're about to install. The container does the
