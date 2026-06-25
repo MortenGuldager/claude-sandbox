@@ -591,17 +591,17 @@ write_reporter_env_file() {
                 printf '%s=%s\n' REPORTER_FILE_PATH "$(quote_env_value "$REPORTER_FILE_PATH")"
                 ;;
             mqtt)
-                # REPORTER_MQTT_TOPIC is a base; the reporter publishes one
-                # retained topic per session under it. Append this sandbox's
-                # container name as the <reporter> segment so every sandbox
-                # gets a distinct subtree (…/<container>/<sessionId>) and its
-                # sessions are tellable apart on the broker. Empty base is left
-                # empty so the reporter surfaces the misconfig itself.
-                local mqtt_topic="$REPORTER_MQTT_TOPIC"
-                [ -n "$mqtt_topic" ] && mqtt_topic="${mqtt_topic%/}/$CONTAINER_NAME"
+                # REPORTER_MQTT_TOPIC is the shared ROOT only. The reporter
+                # appends its own <node> identity segment — a non-reversible
+                # hash of the hostname by default — and one retained topic per
+                # session under it: <root>/<node>/<sessionId>. We deliberately
+                # do NOT bake the container name in here: it is csb-<project>-<id>
+                # and would leak the project to anyone reading the broker. The
+                # reporter's hash still gives each sandbox a distinct, stable
+                # subtree, just without the readable name.
                 printf '%s=%s\n' REPORTER_MQTT_HOST  "$(quote_env_value "$REPORTER_MQTT_HOST")"
                 printf '%s=%s\n' REPORTER_MQTT_PORT  "$(quote_env_value "$REPORTER_MQTT_PORT")"
-                printf '%s=%s\n' REPORTER_MQTT_TOPIC "$(quote_env_value "$mqtt_topic")"
+                printf '%s=%s\n' REPORTER_MQTT_TOPIC "$(quote_env_value "$REPORTER_MQTT_TOPIC")"
                 printf '%s=%s\n' REPORTER_MQTT_USER  "$(quote_env_value "$REPORTER_MQTT_USER")"
                 printf '%s=%s\n' REPORTER_MQTT_PASS  "$(quote_env_value "$REPORTER_MQTT_PASS")"
                 ;;

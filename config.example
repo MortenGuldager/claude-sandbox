@@ -77,11 +77,14 @@
 #REPORTER_FILE_PATH="/var/log/claude-status.jsonl"
 
 # --- mqtt backend ----------------------------------------------------------
-# REPORTER_MQTT_TOPIC is a BASE, not a leaf. Each sandbox appends its own
-# container name, and the reporter publishes one retained topic per session
-# under that, so the live topic is:
-#   <REPORTER_MQTT_TOPIC>/<container>/<sessionId>  =  "#rrggbb"
-# e.g. base "claude_info/status" -> claude_info/status/csb-x-1a2b3c/<sessionId>.
+# REPORTER_MQTT_TOPIC is the shared ROOT, not a leaf. The reporter appends a
+# per-sandbox <node> identity — a non-reversible hash of the container name by
+# default — then one retained topic per session under that, so the live topic is:
+#   <REPORTER_MQTT_TOPIC>/<node>/<sessionId>  =  "#rrggbb"
+# e.g. root "claude_info/status" -> claude_info/status/c7d1caff9ca6/<sessionId>.
+# The container name (csb-<project>-<id>) is intentionally NOT in the topic, so
+# the project you are working on is not exposed to anyone reading the broker;
+# the hash still keeps each sandbox a distinct, stable subtree.
 # A session that ends is cleared with an empty retained message. The broker
 # must speak MQTT 5 (the reporter connects with -V 5 for the expiry backstop).
 #REPORTER_MQTT_HOST="test.mosquitto.org"
