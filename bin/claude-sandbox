@@ -219,8 +219,9 @@ Commands:
   yolo                 Launch Claude inside the sandbox straight away
                        with --dangerously-skip-permissions, skipping
                        the shell. Requires a running container.
-  info                 Show sandbox status, mounts, forwarded ports, and
-                       passthrough devices.
+  info                 Show sandbox status, mounts, forwarded ports,
+                       passthrough devices, and this project's persistent
+                       memory (file/line counts — even with no sandbox yet).
   list                 List all claude-sandbox containers on the host
                        with their auth profile and primary path.
   start                Start a stopped sandbox (no-op if already running).
@@ -228,6 +229,11 @@ Commands:
                        so a later \`start\` resumes it (no-op if already
                        stopped). Use \`destroy\` to also wipe disk.
   destroy              Delete the sandbox container (no-op if absent).
+                       Local and global skills/memory survive.
+  full-destroy         Delete the container AND wipe this project's LOCAL
+                       skills and memory on the host (the per-project state
+                       \`destroy create\` preserves). Prompts first; not
+                       reversible. Global skills/memory are left untouched.
   bases                List cached base images with age and status.
   rebuild-base         Force a rebuild of the current base image.
   gc                   Delete cached base images that don't match the
@@ -421,6 +427,18 @@ mounted project path, forwarded USB devices, forwarded network ports —
 live as individual files in \`$SANDBOX_CLAUDE_D/\`. Read every file
 there at the start of the session, and re-read it if you suspect the
 environment has changed.
+
+Your world here is deliberately narrow: the container is disposable, and
+almost nothing you change outside the mounted project survives a rebuild.
+What does survive, and why the isolation is intentional, is spelled out
+in \`$SANDBOX_CLAUDE_D/02-persistence.md\` and the \`claude-sandbox\`
+skill. Read them before assuming a change will persist or reach beyond
+this project.
+
+A small set of always-on rules and facts shared by *every* sandbox may
+live in \`~/.claude/global-memory/\`. If a \`MEMORY.md\` exists there,
+read it at session start and treat it as standing, cross-project user
+preference.
 EOF
 }
 
@@ -499,26 +517,32 @@ write_git_doc() {
     } | write_sandbox_user_file "$SANDBOX_CLAUDE_D/01-git.md"
 }
 
-# Tells Claude that `~/.claude/skills/` and `~/.claude/projects/<slug>/memory/`
-# are host-mounted and persist across sandbox lifecycles. Without this note,
-# Claude would treat both as ephemeral sandbox state and not realise that
-# skills it authors or memory it writes will be available to its future
-# selves in fresh sandboxes. Kept terse on purpose — this file is always
-# loaded into context. The deeper "when to use which / how to author"
-# guidance lives in the seeded `claude-sandbox` skill, which is lazy-loaded
-# only when relevant (see seed_claude_sandbox_skill).
+# Tells Claude which parts of `~/.claude/` are host-mounted and persist,
+# and — just as important — why the rest is intentionally isolated, so a
+# sandbox understands that its narrow world is by design rather than
+# breakage. Without this note Claude would treat everything as ephemeral
+# and not realise that what it writes locally survives for its future
+# selves, nor that it cannot make anything global on its own. Kept terse
+# on purpose — this file is always loaded into context. The deeper "when
+# to use which / how to author / how to promote" guidance lives in the
+# seeded `claude-sandbox` skill, which is lazy-loaded only when relevant.
 write_persistence_doc() {
     local slug
     slug="$(project_slug_for_path "$REPO_DIR")"
     {
         echo "# Persistent Claude state across sandboxes"
         echo
-        echo "Two directories under \`~/.claude/\` are host-mounted and survive \`destroy create\`:"
+        echo "This container is disposable: \`claude-sandbox destroy create\` wipes its OS, installed packages, and anything under \`\$HOME\` that isn't a mount below. That narrowness is deliberate — it stops one project's sandbox from silently altering another's. Only these survive a rebuild, and only the two **global** tiers cross between projects:"
         echo
-        echo "- \`~/.claude/skills/\` — shared across **all** of this user's sandboxes (host: \`$CONFIG_DIR/skills/\`)."
-        echo "- \`~/.claude/projects/$slug/memory/\` — scoped to this project (host: \`$CONFIG_DIR/memory/$slug/\`)."
+        echo "- **Project tree** — the mounted repo, same path as on the host. Commits and build output persist there."
+        echo "- **Local skills** \`~/.claude/skills/\` — writable, **this project only** (host: \`$CONFIG_DIR/skills/$slug/\`). Skills you author land here and are invisible to other projects."
+        echo "- **Local memory** \`~/.claude/projects/$slug/memory/\` — writable, **this project only** (host: \`$CONFIG_DIR/memory/$slug/\`). \`MEMORY.md\` is the always-loaded index."
+        echo "- **Global skills** — **read-only**, shared by every sandbox. They show up as extra entries in \`~/.claude/skills/\` but you cannot edit them from here (host: \`$CONFIG_DIR/skills-global/\`)."
+        echo "- **Global memory** \`~/.claude/global-memory/\` — **read-only**, shared by every sandbox; always-on rules/facts. Read its \`MEMORY.md\` at session start (host: \`$CONFIG_DIR/memory-global/\`)."
         echo
-        echo "For conventions — what belongs in a skill vs. memory, how to author each, and what survives container teardown — see the \`claude-sandbox\` skill."
+        echo "You write only to the two *local* tiers. Making something global is the user's call alone: they move it, host-side, from a local dir into the matching global dir. You cannot promote it yourself — that gate is exactly why your reach is limited. If a rule ought to apply everywhere, write it to local memory and *tell the user* it's a promotion candidate."
+        echo
+        echo "For what belongs in a skill vs. memory, how to author each, and how promotion works, see the \`claude-sandbox\` skill."
     } | write_sandbox_user_file "$SANDBOX_CLAUDE_D/02-persistence.md"
 }
 
@@ -579,6 +603,66 @@ seed_claude_first_run_state() {
 
         rm -f "$tmp"
     ' _ "$REPO_DIR"
+}
+
+# Pushes the always-on global memory index into session context at start.
+# Per-project memory under ~/.claude/projects/<slug>/memory/ is auto-loaded
+# by Claude Code, but the cross-project global-memory mount has no native
+# location: the CLAUDE.md stub only *points* at it, a pull the model can skip
+# under time pressure (a /resume that dives straight into work is exactly the
+# case that bit us). A SessionStart hook makes it a push instead — on startup,
+# resume, clear, and compact it emits the index as additionalContext so it
+# cannot be missed. Both the hook script and settings.json live in the
+# ephemeral ~/.claude and are re-seeded on every create, so this is idempotent.
+seed_global_memory_hook() {
+    local hook_script="/home/ubuntu/.claude/hooks/inject-global-memory.sh"
+
+    # Quoted heredoc: the script's own $HOME/$index must survive to the
+    # container untouched, not expand here on the host.
+    write_sandbox_user_file "$hook_script" <<'EOF'
+#!/usr/bin/env bash
+# SessionStart hook: inject the global-memory index into context. Global
+# memory is a read-only, cross-project mount that Claude Code does not
+# auto-load, so we push its MEMORY.md in here. Emits the documented
+# hookSpecificOutput.additionalContext JSON (plain stdout is not added to
+# context). No-op when the index is absent or empty.
+set -euo pipefail
+index="$HOME/.claude/global-memory/MEMORY.md"
+[ -s "$index" ] || exit 0
+header="# Global sandbox memory (always-on, cross-project, read-only)
+
+Standing rules and facts shared by every claude-sandbox. Treat as user
+preference. This is the index; read the referenced files under
+~/.claude/global-memory/ as they become relevant."
+jq -Rs --arg h "$header" \
+    '{hookSpecificOutput:{hookEventName:"SessionStart",additionalContext:($h + "\n\n" + .)}}' \
+    "$index"
+EOF
+    incus exec "$CONTAINER_NAME" -- sudo -u ubuntu chmod 0755 "$hook_script"
+
+    # Merge the hook into settings.json without disturbing what
+    # seed_claude_first_run_state already wrote (read-modify-write, seeded
+    # from {} if absent). One matcher entry per source: SessionStart matchers
+    # have no catch-all, and we want startup + resume in particular, plus
+    # clear/compact so a rebuilt context re-surfaces the standing rules.
+    # shellcheck disable=SC2016
+    incus exec "$CONTAINER_NAME" -- sudo -u ubuntu -H bash -c '
+        set -e
+        cmd=$1
+        settings=~/.claude/settings.json
+        tmp=$(mktemp)
+        mkdir -p ~/.claude
+        [ -f "$settings" ] || echo "{}" > "$settings"
+        jq --arg cmd "$cmd" "
+            .hooks.SessionStart = [
+              {matcher: \"startup\", hooks: [{type: \"command\", command: \$cmd}]},
+              {matcher: \"resume\",  hooks: [{type: \"command\", command: \$cmd}]},
+              {matcher: \"clear\",   hooks: [{type: \"command\", command: \$cmd}]},
+              {matcher: \"compact\", hooks: [{type: \"command\", command: \$cmd}]}
+            ]
+        " "$settings" > "$tmp" && mv "$tmp" "$settings"
+        rm -f "$tmp"
+    ' _ "$hook_script"
 }
 
 write_reporter_env_file() {
@@ -885,6 +969,9 @@ cmd_create() {
     echo "Pre-accepting Claude Code first-run prompts (theme, onboarding, trust, bypass)..."
     seed_claude_first_run_state
 
+    echo "Installing SessionStart hook to auto-load global memory..."
+    seed_global_memory_hook
+
     echo "Sandbox is ready."
 }
 
@@ -1052,45 +1139,148 @@ attach_mount() {
         path="$host_path" >/dev/null
 }
 
-# Mounts the two host-side directories that hold Claude state we want
-# to survive sandbox destruction: user skills (shared across every
-# sandbox) and per-project auto-memory. The in-sandbox target paths
-# are the exact locations Claude Code itself uses, so no shim or
-# config-file edit is needed — the mount makes the host dir appear at
-# the path Claude already scans. Creates the host dirs if missing.
-# Device-only — paired CLAUDE.d doc is written by write_persistence_doc
-# once the container is up.
+# Mounts the host-side directories that hold Claude state we want to
+# survive sandbox destruction. There are two tiers per kind, and the
+# split is the whole point — it is what stops one project from bleeding
+# into another:
+#
+#   skills  local  -> ~/.claude/skills/           (rw, this project only)
+#           global -> ~/.claude/skills/<name>/    (ro, every sandbox)
+#   memory  local  -> ~/.claude/projects/<slug>/memory/ (rw, this project)
+#           global -> ~/.claude/global-memory/    (ro, every sandbox)
+#
+# Claude writes only to the LOCAL tiers, which are per-project, so a
+# skill drafted or a fact learned in one project never surfaces in
+# another. The GLOBAL tiers are read-only inside the sandbox: the only
+# way content becomes global is the user moving it, host-side, from a
+# local dir into the matching global dir (see the claude-sandbox skill).
+# That promotion gate is deliberate and is why a sandbox cannot widen
+# its own reach.
+#
+# The local skills / local memory targets are the exact paths Claude Code
+# scans natively, so no shim is needed. Global memory has no native path,
+# so the CLAUDE.md stub is told to read it. Device-only — the paired
+# CLAUDE.d doc is written by write_persistence_doc once the container is up.
 attach_claude_persistence_mounts() {
-    local skills_host="$CONFIG_DIR/skills"
-    local slug memory_host
+    local slug
     slug="$(project_slug_for_path "$REPO_DIR")"
-    memory_host="$CONFIG_DIR/memory/$slug"
 
-    mkdir -p "$skills_host" "$memory_host"
+    local skills_local="$CONFIG_DIR/skills/$slug"
+    local skills_global="$CONFIG_DIR/skills-global"
+    local memory_local="$CONFIG_DIR/memory/$slug"
+    local memory_global="$CONFIG_DIR/memory-global"
 
+    # Migration: older sandboxes kept a single shared skills dir directly
+    # at $CONFIG_DIR/skills/. Every skill there is "global" under this
+    # model, so lift any that still sit there into skills-global/.
+    migrate_flat_global_skills "$CONFIG_DIR/skills" "$skills_global"
+
+    mkdir -p "$skills_local" "$skills_global" "$memory_local" "$memory_global"
+
+    # Seed the managed global skill first, so it exists on disk before the
+    # global-skill mounts are enumerated below — otherwise on a first-ever
+    # create it wouldn't mount into the sandbox until the next create.
+    seed_claude_sandbox_skill "$skills_global"
+
+    # Local, writable skills — this project only. Mounted at the native
+    # personal-skills path so Claude Code discovers them and can draft here.
     incus config device remove "$CONTAINER_NAME" claude-skills 2>/dev/null || true
     incus config device add "$CONTAINER_NAME" claude-skills disk \
-        source="$skills_host" \
+        source="$skills_local" \
         path="/home/ubuntu/.claude/skills" >/dev/null
 
+    # Global, read-only skills — one bind-mount per skill, layered as
+    # subdirectories of the same ~/.claude/skills/ dir so they appear
+    # beside the local ones but cannot be edited from inside.
+    attach_global_skill_mounts "$skills_local" "$skills_global"
+
+    # Local, writable memory — this project only.
     incus config device remove "$CONTAINER_NAME" claude-memory 2>/dev/null || true
     incus config device add "$CONTAINER_NAME" claude-memory disk \
-        source="$memory_host" \
+        source="$memory_local" \
         path="/home/ubuntu/.claude/projects/$slug/memory" >/dev/null
 
-    seed_claude_sandbox_skill "$skills_host"
+    # Global, read-only memory — always-on rules/facts for every sandbox.
+    # Not a native Claude Code path, so the CLAUDE.md stub reads it.
+    incus config device remove "$CONTAINER_NAME" claude-memory-global 2>/dev/null || true
+    incus config device add "$CONTAINER_NAME" claude-memory-global disk \
+        source="$memory_global" \
+        path="/home/ubuntu/.claude/global-memory" \
+        readonly=true >/dev/null
+}
+
+# One-time migration from the pre-tier layout where $CONFIG_DIR/skills/
+# held global skills directly (as <name>/SKILL.md). Moves each such skill
+# dir into skills-global/. The new local tier lives at skills/<slug>/,
+# whose subdirs have no SKILL.md at this level, so they are left alone.
+migrate_flat_global_skills() {
+    local skills_root="$1" skills_global="$2"
+    [ -d "$skills_root" ] || return 0
+    local dir name
+    for dir in "$skills_root"/*/; do
+        [ -d "$dir" ] || continue
+        [ -f "$dir/SKILL.md" ] || continue   # slug dirs have no SKILL.md here
+        name="$(basename "$dir")"
+        mkdir -p "$skills_global"
+        if [ -e "$skills_global/$name" ]; then
+            rm -rf "${dir%/}"                 # already promoted; drop the stray copy
+        else
+            mv "${dir%/}" "$skills_global/$name"
+        fi
+    done
+}
+
+# Bind-mounts each global skill read-only as a subdirectory of the local
+# skills mount, so ~/.claude/skills/ shows local + global side by side.
+# The mountpoint is pre-created host-side (as the invoking user, hence
+# ubuntu-owned via idmap) so Incus does not create it as a container-root
+# dir the user can't later delete. Stale mounts from a previous run are
+# dropped first so an un-promoted skill doesn't linger.
+attach_global_skill_mounts() {
+    local skills_local="$1" skills_global="$2"
+    local dev
+    while IFS= read -r dev; do
+        [ -n "$dev" ] || continue
+        incus config device remove "$CONTAINER_NAME" "$dev" 2>/dev/null || true
+    done < <(incus config device list "$CONTAINER_NAME" 2>/dev/null | grep '^claude-gskill-' || true)
+
+    # Prune stale placeholder mountpoints: empty dirs under the local skills
+    # tree left behind by a global skill that has since been removed. A real
+    # local skill is never empty (it carries a SKILL.md), and `rmdir` refuses
+    # non-empty dirs, so this can only ever remove a leftover placeholder.
+    # Dirs that still back a current global skill are skipped to avoid churn.
+    local ph name
+    for ph in "$skills_local"/*/; do
+        [ -d "$ph" ] || continue
+        name="$(basename "$ph")"
+        [ -d "$skills_global/$name" ] && continue
+        rmdir "${ph%/}" 2>/dev/null || true
+    done
+
+    local skill_dir key
+    for skill_dir in "$skills_global"/*/; do
+        [ -d "$skill_dir" ] || continue
+        name="$(basename "$skill_dir")"
+        key="$(printf '%s' "$name" | md5sum | cut -c1-10)"
+        mkdir -p "$skills_local/$name"
+        incus config device add "$CONTAINER_NAME" "claude-gskill-$key" disk \
+            source="${skill_dir%/}" \
+            path="/home/ubuntu/.claude/skills/$name" \
+            readonly=true >/dev/null
+    done
 }
 
 # Writes a managed skill into the host-mounted skills dir that explains
-# the persistence layer in depth — when to use a skill vs. memory, how to
-# author each, what survives `destroy create`. It is a skill (not a
-# CLAUDE.d note) so it lazy-loads only when relevant, keeping startup
-# context lean. Always overwritten on `create` so the guidance tracks
-# the tool version; users who want to customise should copy to a
-# different directory name (the file itself documents this).
+# the persistence layer in depth — the local vs. global tiers, when to
+# use a skill vs. memory, how to author each, how promotion works, and
+# what survives `destroy create`. It is a global skill (not a CLAUDE.d
+# note) so it lazy-loads only when relevant, keeping startup context lean.
+# Seeded into skills-global/ and always overwritten on `create` so the
+# guidance tracks the tool version; users who want to customise should
+# copy to a different directory name (the file itself documents this).
 seed_claude_sandbox_skill() {
-    local skills_host="$1"
-    local skill_dir="$skills_host/claude-sandbox"
+    local skills_global="$1"
+    local skill_dir="$skills_global/claude-sandbox"
     local skill_file="$skill_dir/SKILL.md"
     local slug
     slug="$(project_slug_for_path "$REPO_DIR")"
@@ -1098,32 +1288,47 @@ seed_claude_sandbox_skill() {
     cat > "$skill_file" <<EOF
 ---
 name: claude-sandbox
-description: Conventions for the claude-sandbox container's persistent skills/memory infrastructure — when to use which, how to author each, what survives \`destroy create\`. Load before authoring a skill, writing project memory, or troubleshooting files that disappeared after a sandbox rebuild.
+description: Conventions for the claude-sandbox container's persistent skills/memory infrastructure — the local vs. global tiers, when to use which, how to author each, how to promote something to global, and what survives \`destroy create\`. Load before authoring a skill, writing memory, or troubleshooting files that disappeared after a sandbox rebuild.
 ---
 
 # How the claude-sandbox persistence layer works
 
-> This file is regenerated by \`claude-sandbox create\` on every run. Local edits are overwritten. To customise, copy the directory to a different name (e.g. \`claude-sandbox.local/\`) so the original path stays free for regeneration.
+> This file is a global read-only skill, regenerated by \`claude-sandbox create\` on every run. You cannot edit it from inside the sandbox, and local edits would be overwritten anyway. To customise, copy the directory to a different name (e.g. \`claude-sandbox.local/\`) under a *local* skills dir.
 
-You are running inside an Incus container managed by \`claude-sandbox\`. The container itself is disposable — \`claude-sandbox destroy create\` wipes container OS state. Three layers survive a rebuild:
+You are running inside an Incus container managed by \`claude-sandbox\`. The container is disposable: \`claude-sandbox destroy create\` wipes its OS, packages, and everything under \`\$HOME\` that isn't one of the mounts below. That narrowness is deliberate — it is what keeps one project's sandbox from silently changing another's. Five things survive a rebuild:
 
-1. **The mounted project directory** — same path on host and sandbox, read-write. Anything you commit, build artefact you produce, or file you drop in the project tree persists on the host.
-2. **\`~/.claude/skills/\`** — host-mounted at \`$CONFIG_DIR/skills/\`. Shared across every sandbox this user runs (any project, any container).
-3. **\`~/.claude/projects/$slug/memory/\`** — host-mounted at \`$CONFIG_DIR/memory/$slug/\`. Scoped to this project's host path. The \`<slug>\` segment is the project realpath with \`/\` replaced by \`-\`, matching Claude Code's own convention.
+1. **The mounted project directory** — same path on host and sandbox, read-write. Commits, build artefacts, and files you drop in the tree persist on the host.
+2. **Local skills** — \`~/.claude/skills/\`, read-write, **this project only** (host: \`$CONFIG_DIR/skills/$slug/\`). Skills you author land here.
+3. **Local memory** — \`~/.claude/projects/$slug/memory/\`, read-write, **this project only** (host: \`$CONFIG_DIR/memory/$slug/\`). \`MEMORY.md\` is the always-loaded index. \`<slug>\` is the project realpath with \`/\` replaced by \`-\`, matching Claude Code's own convention.
+4. **Global skills** — **read-only**, shared by *every* sandbox. They appear as extra entries alongside your local ones in \`~/.claude/skills/\`, but you cannot edit them from here (host: \`$CONFIG_DIR/skills-global/\`).
+5. **Global memory** — \`~/.claude/global-memory/\`, **read-only**, shared by every sandbox; always-on rules and facts. Its \`MEMORY.md\` is auto-injected into context at session start by a \`SessionStart\` hook (and pointed at by the CLAUDE.md stub as a backstop), so it reaches you without a manual read (host: \`$CONFIG_DIR/memory-global/\`).
 
-Everything else under \`~/.claude/projects/$slug/\` (sessions, todos) is ephemeral by design — those are per-conversation state, not knowledge to carry forward. The container OS (\`/etc\`, \`/usr\`, \`/var\`, installed packages, systemd units other than the reporter) is also wiped on \`destroy\`.
+Everything else under \`~/.claude/projects/$slug/\` (sessions, todos) is ephemeral — per-conversation state, not knowledge to carry forward. The container OS (\`/etc\`, \`/usr\`, \`/var\`, installed packages, systemd units other than the reporter) is wiped on \`destroy\`.
+
+## Why your world is this narrow
+
+The isolation is the design, not a bug. You write only to the two **local** tiers, and local means *this project's host path only*. A skill you draft or a fact you learn here is invisible to every other project's sandbox. The two **global** tiers are the only things that cross projects, and inside the sandbox they are read-only. So nothing you do can widen its own blast radius — you cannot make a change that silently reaches the user's other work. That is the guarantee the tiers buy.
+
+## Promotion: how something becomes global
+
+You cannot promote anything yourself. Promotion is a host-side move by the user: they move the skill dir or memory file from a local tier into the matching global tier —
+
+- skill: \`$CONFIG_DIR/skills/$slug/<name>/\` → \`$CONFIG_DIR/skills-global/<name>/\`
+- memory: \`$CONFIG_DIR/memory/$slug/<file>\` → \`$CONFIG_DIR/memory-global/<file>\`
+
+Then it re-mounts read-only into every sandbox on the next \`create\`. So the right move when you believe something should be global is: **write it to the local tier, then tell the user it's a promotion candidate and let them decide.**
 
 ## Skills vs. memory — which to use
 
-Use a **skill** when the content is a *procedure or recipe* that could apply in many projects, and you can write a precise \`description\` that names the trigger ("how to set up an Incus VM", "how to debug systemd unit failures"). Skills live in \`~/.claude/skills/\` and are lazy-loaded by description match — they cost nothing when irrelevant, so accumulating them over years is fine.
+Use a **skill** when the content is a *procedure or recipe* and you can write a precise \`description\` naming the trigger ("how to set up an Incus VM", "how to debug systemd unit failures"). Skills are lazy-loaded by description match — they cost nothing when irrelevant.
 
-Use **memory** when the content is a *fact about the user, project, or domain* ("user is a senior Go dev", "release freeze starts 2026-03-05 for mobile cut", "auth rewrite is driven by legal, not tech debt"). Memory lives in \`~/.claude/projects/<slug>/memory/\` and \`MEMORY.md\` is always loaded — keep it terse. Follow the auto-memory conventions in the main system prompt.
+Use **memory** when the content is a *fact about the user, project, or domain* ("user is a senior Go dev", "release freeze starts 2026-03-05", "auth rewrite is driven by legal"). \`MEMORY.md\` is always loaded — keep it terse.
 
-Rough rule of thumb: if the content starts with "how to…" it's a skill; if it starts with "X is…" or "we decided…" it's memory.
+Rough rule of thumb: "how to…" → skill; "X is…" or "we decided…" → memory. Cuts across the other axis: "does this apply to just this project or everywhere?" decides local vs. global — but you only ever *write* local; global is the user's promotion.
 
 ## Authoring a skill
 
-Create \`~/.claude/skills/<kebab-name>/SKILL.md\`:
+Create it under your local skills dir, \`~/.claude/skills/<kebab-name>/SKILL.md\`:
 
 \`\`\`markdown
 ---
@@ -1133,30 +1338,33 @@ description: <one sentence describing exactly when this skill should fire — be
 
 # <human-readable title>
 
-<body — load into context only when the description matches>
+<body — loaded into context only when the description matches>
 \`\`\`
 
-The \`description\` field is the entire gate. "How to do X in environment Y" beats "X helpers". A skill with a vague description is a skill that never loads.
+The \`description\` field is the entire gate. "How to do X in environment Y" beats "X helpers". A vague description never loads.
 
 ## Authoring memory
 
-Follow the auto-memory rules in the main system prompt. Files land in \`~/.claude/projects/$slug/memory/\` (host: \`$CONFIG_DIR/memory/$slug/\`). \`MEMORY.md\` is the always-loaded index; topic files are pointed to from it. Keep the index under ~150 chars per entry — lines past 200 get truncated.
+Follow the auto-memory rules in the main system prompt. Local memory files land in \`~/.claude/projects/$slug/memory/\` (host: \`$CONFIG_DIR/memory/$slug/\`). \`MEMORY.md\` is the always-loaded index; topic files are pointed to from it. Keep index lines under ~150 chars — past 200 they get truncated. Global memory (read-only here) works the same way but its index lives in \`~/.claude/global-memory/MEMORY.md\`.
 
 ## When something doesn't persist
 
-If a file is gone after \`destroy create\`, it was outside the three layers above. Most common gotchas:
+If a file is gone after \`destroy create\`, it was outside the five layers above:
 
 - Files under \`~/.claude/projects/$slug/\` outside \`memory/\` — sessions and todos go away on purpose.
+- A write into a **global** tier — it's read-only inside the sandbox; the write either failed or landed in an ephemeral overlay. Author locally instead.
 - Anything under \`/etc\`, \`/usr\`, \`/opt\`, \`/var\` — container OS, ephemeral.
 - Files in \`\$HOME\` outside the mounted dirs — ephemeral.
-- Packages installed with \`apt\` / \`pip\` / \`npm -g\` — ephemeral. If they need to survive, bake them into the base image (see \`build_base_image\` in \`bin/claude-sandbox\`) or install per-project under the mounted project tree.
+- Packages installed with \`apt\` / \`pip\` / \`npm -g\` — ephemeral. To survive, bake them into the base image (see \`build_base_image\` in \`bin/claude-sandbox\`) or install per-project under the mounted project tree.
 
 ## Host-side layout (for the user)
 
-- Skills: \`$CONFIG_DIR/skills/\`
-- Memory: \`$CONFIG_DIR/memory/$slug/\`
+- Local skills:  \`$CONFIG_DIR/skills/$slug/\`
+- Global skills: \`$CONFIG_DIR/skills-global/\`
+- Local memory:  \`$CONFIG_DIR/memory/$slug/\`
+- Global memory: \`$CONFIG_DIR/memory-global/\`
 
-The user edits or prunes these directly between sandbox lifecycles. There is no in-sandbox CLI for managing them — it's just files on the host.
+The user edits, prunes, and promotes these directly between sandbox lifecycles — they're just files on the host. \`claude-sandbox full-destroy\` deletes the container *and* wipes this project's **local** skills and memory (\`$CONFIG_DIR/skills/$slug/\` and \`$CONFIG_DIR/memory/$slug/\`); the shared global tiers are never touched. Plain \`destroy\` leaves everything intact.
 EOF
 }
 
@@ -1166,7 +1374,7 @@ EOF
 # as the unprivileged `ubuntu` user — including the CLAUDE.md stub and
 # the seeded settings.json. Hand the parent dirs back to ubuntu.
 # Non-recursive on purpose: the bind-mounted contents underneath
-# (skills/, memory/) keep their host ownership untouched.
+# (skills/, memory/, global-memory/) keep their host ownership untouched.
 fix_claude_dir_ownership() {
     local slug
     slug="$(project_slug_for_path "$REPO_DIR")"
@@ -1404,9 +1612,39 @@ session_summary() {
     echo "${label:--}"
 }
 
+# Summarises this project's host-side persistent memory dir: file count,
+# total line count, and the always-loaded MEMORY.md index separately (its
+# size drives startup context bloat). Lives on the host independent of the
+# container, so it reports even when no sandbox has been created yet.
+print_memory_info() {
+    local slug memory_host
+    slug="$(project_slug_for_path "$REPO_DIR")"
+    memory_host="$CONFIG_DIR/memory/$slug"
+
+    echo "Memory (persists across sandboxes):"
+    echo "  Host dir:  $memory_host"
+    if [ ! -d "$memory_host" ]; then
+        echo "  Contents:  (not created yet)"
+        return 0
+    fi
+    local files lines index
+    files="$(find "$memory_host" -type f | wc -l)"
+    if [ "$files" -eq 0 ]; then
+        echo "  Contents:  (empty)"
+        return 0
+    fi
+    lines="$(find "$memory_host" -type f -exec cat {} + | wc -l)"
+    if [ -f "$memory_host/MEMORY.md" ]; then
+        index=" (MEMORY.md index: $(wc -l < "$memory_host/MEMORY.md") lines)"
+    fi
+    echo "  Contents:  $files file(s), $lines line(s)${index:-}"
+}
+
 cmd_info() {
     if ! container_exists "$CONTAINER_NAME"; then
         echo "No sandbox found for this directory."
+        echo
+        print_memory_info
         return 0
     fi
     local status mapped base_hash auth_profile cur_mem cur_swap cur_cpu
@@ -1505,6 +1743,9 @@ cmd_info() {
     else
         echo "$hw"
     fi
+
+    echo
+    print_memory_info
 }
 
 cmd_list() {
@@ -1575,6 +1816,55 @@ cmd_destroy() {
     fi
     incus delete -f "$CONTAINER_NAME"
     echo "Sandbox deleted."
+}
+
+# Like `destroy`, but also removes this project's LOCAL persistent state
+# on the host — the local skills and local memory dirs a plain `destroy
+# create` keeps. The global tiers ($CONFIG_DIR/skills-global and
+# $CONFIG_DIR/memory-global) are left untouched: they belong to every
+# sandbox this user runs, not to this path. Prompts before the wipe
+# (default no) because that state outlives the container by design and
+# its removal is not reversible. `full-destroy=yes`/`=force` skips the
+# prompt, e.g. for chaining `full-destroy=yes create`.
+cmd_full_destroy() {
+    local force="${1:-}"
+    local slug skills_local memory_local
+    slug="$(project_slug_for_path "$REPO_DIR")"
+    skills_local="$CONFIG_DIR/skills/$slug"
+    memory_local="$CONFIG_DIR/memory/$slug"
+
+    cmd_destroy
+
+    local -a targets=()
+    [ -d "$skills_local" ] && targets+=("$skills_local")
+    [ -d "$memory_local" ] && targets+=("$memory_local")
+
+    if [ "${#targets[@]}" -eq 0 ]; then
+        echo "No local persistent state for this project — nothing more to remove."
+        return 0
+    fi
+
+    if [ "$force" != "yes" ] && [ "$force" != "force" ]; then
+        echo
+        echo "This permanently deletes this project's local persistent state:"
+        local t
+        for t in "${targets[@]}"; do echo "  $t"; done
+        echo "It survives a normal 'destroy create'; removal is not reversible."
+        echo "(Global skills/memory in $CONFIG_DIR/skills-global and $CONFIG_DIR/memory-global are left untouched.)"
+        printf 'Delete it? [y/N] '
+        local reply
+        read -r reply || reply=""
+        case "$reply" in
+            y|Y|yes|YES) ;;
+            *)
+                echo "Kept local state. Container was still deleted."
+                return 0
+                ;;
+        esac
+    fi
+
+    rm -rf "${targets[@]}"
+    echo "Local persistent state deleted: ${targets[*]}"
 }
 
 cmd_bases() {
@@ -1705,6 +1995,12 @@ for token in "$@"; do
             ;;
         dev)
             ;;
+        full-destroy)
+            if [ "$TOKEN_HAS_ARG" -eq 1 ] && [ "$TOKEN_ARG" != "yes" ] && [ "$TOKEN_ARG" != "force" ]; then
+                echo "Command 'full-destroy' only accepts 'yes'/'force' to skip the prompt; got '$token'" >&2
+                exit 1
+            fi
+            ;;
         auth)
             if [ "$TOKEN_HAS_ARG" -ne 1 ] || [ -z "$TOKEN_ARG" ]; then
                 echo "Command 'auth' requires a profile, e.g. auth=mogul" >&2
@@ -1757,6 +2053,7 @@ for token in "$@"; do
         start)          cmd_start ;;
         stop)           cmd_stop ;;
         destroy)        cmd_destroy ;;
+        full-destroy)   cmd_full_destroy "$TOKEN_ARG" ;;
         bases)          cmd_bases ;;
         rebuild-base)   cmd_rebuild_base ;;
         gc)             cmd_gc ;;

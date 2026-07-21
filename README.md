@@ -92,6 +92,7 @@ claude-sandbox yolo          # ...or launch Claude in the sandbox directly
 claude-sandbox stop          # pause the container (keeps disk state)
 claude-sandbox start         # resume it later
 claude-sandbox destroy       # ...or nuke the container entirely
+claude-sandbox full-destroy  # nuke the container AND this project's local skills + memory
 ```
 
 Commands chain — `claude-sandbox destroy create auth=mogul dev=ttyACM0 shell`
@@ -187,13 +188,15 @@ clashing with container OS paths (`/etc`, `/usr`, etc.).
 ### Persistent state across sandboxes
 
 Sandboxes are deliberately disposable, but Claude's own learned context
-shouldn't be. `create` auto-mounts two host directories at the exact
-paths Claude Code already uses, so user skills and per-project
-auto-memory survive `destroy create`:
+shouldn't be. Both skills and memory come in two tiers, and the split is
+what keeps one project's sandbox from bleeding into another's. `create`
+auto-mounts four host directories:
 
 ```
-~/.config/claude-sandbox/skills/         -> ~/.claude/skills/                  (shared across all sandboxes)
-~/.config/claude-sandbox/memory/<slug>/  -> ~/.claude/projects/<slug>/memory/  (per project)
+~/.config/claude-sandbox/skills/<slug>/   -> ~/.claude/skills/                  (local, this project, read-write)
+~/.config/claude-sandbox/skills-global/   -> ~/.claude/skills/<name>/           (global, every sandbox, read-only)
+~/.config/claude-sandbox/memory/<slug>/   -> ~/.claude/projects/<slug>/memory/  (local, this project, read-write)
+~/.config/claude-sandbox/memory-global/   -> ~/.claude/global-memory/           (global, every sandbox, read-only)
 ```
 
 `<slug>` is the project realpath with `/` replaced by `-` — the same
@@ -202,12 +205,41 @@ dirs. Because `claude-sandbox` mounts the project at the same path
 on both host and sandbox, the slug is identical on both sides, so the
 binding is fully deterministic.
 
-Both dirs are created on first `create` and mounted read-write, so
-Claude can author new skills and write memory entries during a
-session and have them persist on the host. The user edits or prunes
-them directly between sandbox lifecycles. Sessions and todos under
-`~/.claude/projects/<slug>/` (siblings of `memory/`) deliberately stay
-ephemeral — they are per-conversation state, not knowledge to carry
+Claude writes only to the two **local** tiers. They are per-project, so
+a skill it drafts or a fact it learns in one project never surfaces in
+another. The **global** tiers are read-only inside the sandbox and are
+shared by every sandbox you run; the global skills are bind-mounted one
+per skill as subdirectories of `~/.claude/skills/`, so they appear beside
+the local ones but can't be edited from within.
+
+Global memory has no native Claude Code location. Per-project memory is
+auto-loaded, but this one would only be reachable by a pull the model can
+skip under time pressure, so `create` installs a `SessionStart` hook that
+pushes `~/.claude/global-memory/MEMORY.md` into context on startup, resume,
+clear, and compact (the always-loaded `CLAUDE.md` stub still points at it as
+a backstop). That's your place for standing, cross-project rules ("always do
+X", "never touch Y").
+
+**Promotion is yours alone.** The only way something becomes global is
+you moving it, host-side, from a local dir into the matching global dir:
+
+```
+skills:  skills/<slug>/<name>/   -> skills-global/<name>/
+memory:  memory/<slug>/<file>    -> memory-global/<file>
+```
+
+Claude cannot do this itself — it can only draft locally and flag the
+result as a promotion candidate. That gate is why a sandbox can't widen
+its own reach. On the next `create` the moved item re-mounts read-only
+into every sandbox.
+
+To wipe a project's **local** skills and memory along with the container
+in one step, use `full-destroy` instead of `destroy` — it removes
+`~/.config/claude-sandbox/skills/<slug>/` and
+`~/.config/claude-sandbox/memory/<slug>/` after deleting the container
+(prompting first), leaving the global tiers untouched. Sessions and todos
+under `~/.claude/projects/<slug>/` (siblings of `memory/`) deliberately
+stay ephemeral — they are per-conversation state, not knowledge to carry
 forward.
 
 Skills are lazy-loaded by their `description` field, so accumulating
@@ -217,14 +249,15 @@ sit harmlessly until you prune them.
 
 To make sure Claude in any fresh sandbox understands this layout
 without bloating the always-loaded startup context, `create` also
-seeds a managed `claude-sandbox` skill into the skills dir. Its
-description matches when Claude is about to author a skill, write
-memory, or troubleshoot files that didn't survive a rebuild — so the
-deeper guidance ("when is something a skill vs. memory", "how to
-author either", "what is ephemeral and why") loads on demand rather
-than every session. The file is regenerated on every `create` so it
-tracks the tool version; rename the directory if you want a custom
-copy that survives.
+seeds a managed `claude-sandbox` skill into `skills-global/` (so it's
+available, read-only, in every sandbox). Its description matches when
+Claude is about to author a skill, write memory, promote something, or
+troubleshoot files that didn't survive a rebuild — so the deeper
+guidance ("local vs. global", "when is something a skill vs. memory",
+"how to author either", "how promotion works", "what is ephemeral and
+why") loads on demand rather than every session. The file is
+regenerated on every `create` so it tracks the tool version; copy the
+directory under a different name if you want a custom variant.
 
 ### Timezone
 
@@ -267,16 +300,19 @@ device add` away.
 ### Telling Claude about its environment
 
 `create` writes a small `~/.claude/CLAUDE.md` inside the sandbox that
-points Claude at `~/.claude/CLAUDE.d/`. Each runtime fact that
-depends on how the sandbox was launched lands as its own file there:
+points Claude at `~/.claude/CLAUDE.d/`, flags that the sandbox world is
+deliberately narrow, and tells Claude to read
+`~/.claude/global-memory/MEMORY.md` for standing cross-project rules.
+Each runtime fact that depends on how the sandbox was launched lands as
+its own file there:
 
 - `00-sandbox.md` — container name and timezone.
 - `01-git.md` — trunk branch and the forwarded git identity.
-- `02-persistence.md` — short pointer to the host-mounted skills and
-  per-project memory directories (see [Persistent state across
-  sandboxes](#persistent-state-across-sandboxes)); the in-depth
-  conventions live in the seeded `claude-sandbox` skill so they
-  lazy-load on demand instead of bloating startup context.
+- `02-persistence.md` — the local vs. global skills/memory tiers, why the
+  isolation is intentional, and that promotion is the user's job (see
+  [Persistent state across sandboxes](#persistent-state-across-sandboxes));
+  the in-depth conventions live in the seeded `claude-sandbox` skill so
+  they lazy-load on demand instead of bloating startup context.
 - `mount-<hash>.md` — one per mounted host directory (the implicit cwd
   mount and any `mount=<path>` adds).
 - `device-<port>.md` — one per `dev`-ed USB/serial device, with
