@@ -47,8 +47,12 @@ SANDBOX_IMAGE="images:ubuntu/24.04"
 # raw.lxc → `lxc.cgroup2.memory.swap.max` and use cgroup-native suffix
 # syntax (K/M/G/T = binary). Total per-sandbox ceiling is therefore
 # SANDBOX_MEMORY + SANDBOX_MEMORY_SWAP.
-SANDBOX_MEMORY="16GiB"
-SANDBOX_MEMORY_SWAP="8G"
+# Deliberately conservative: the default ceiling is a safety belt against
+# a runaway agent, not a performance target, and it must fit small hosts
+# (an 8GB Raspberry Pi) out of the box. Bump these in the config file when
+# a project needs more headroom.
+SANDBOX_MEMORY="4GiB"
+SANDBOX_MEMORY_SWAP="2G"
 SANDBOX_CPU="1"
 
 # Upstream source for the status reporter. `create` fetches this repo at
@@ -897,6 +901,17 @@ ensure_base_image() {
     build_base_image
 }
 
+# True if the host kernel exposes the cgroup v2 memory controller. On a
+# normal PC this is always on, but the default Raspberry Pi OS kernel
+# ships it disabled, so `limits.memory` and the raw.lxc swap cap would
+# otherwise make the container fail to start. We assume cgroup v2
+# throughout (the swap cap already uses lxc.cgroup2.*), so this reads the
+# unified hierarchy's controller list.
+host_has_memory_cgroup() {
+    local controllers=/sys/fs/cgroup/cgroup.controllers
+    [ -r "$controllers" ] && grep -qw memory "$controllers"
+}
+
 # --- Commands ---------------------------------------------------------------
 
 cmd_create() {
@@ -911,6 +926,22 @@ cmd_create() {
     incus init "local:$BASE_ALIAS" "$CONTAINER_NAME" -c security.privileged=true
     incus config set "$CONTAINER_NAME" user.meta.hostpath "$REPO_DIR"
     incus config set "$CONTAINER_NAME" user.meta.base-hash "$BASE_HASH"
+
+    # The memory and swap caps need the cgroup v2 memory controller. The
+    # default Raspberry Pi OS kernel disables it, which would make the
+    # container fail to start once the swap cap is applied. Detect that
+    # up front, tell the user the one-line fix, and fall back to
+    # unlimited memory so the sandbox still comes up.
+    if { [ -n "$SANDBOX_MEMORY" ] || [ -n "$SANDBOX_MEMORY_SWAP" ]; } \
+        && ! host_has_memory_cgroup; then
+        echo "Warning: the kernel's cgroup v2 memory controller is not enabled;" >&2
+        echo "         memory/swap limits will be skipped for this sandbox." >&2
+        echo "         On Raspberry Pi OS, append to /boot/firmware/cmdline.txt (one line):" >&2
+        echo "             cgroup_enable=memory cgroup_memory=1" >&2
+        echo "         then reboot and 'destroy create' to apply the limits." >&2
+        SANDBOX_MEMORY=""
+        SANDBOX_MEMORY_SWAP=""
+    fi
 
     [ -n "$SANDBOX_MEMORY" ]      && incus config set "$CONTAINER_NAME" limits.memory "$SANDBOX_MEMORY"
     [ -n "$SANDBOX_MEMORY_SWAP" ] && incus config set "$CONTAINER_NAME" raw.lxc      "lxc.cgroup2.memory.swap.max=$SANDBOX_MEMORY_SWAP"

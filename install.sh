@@ -60,6 +60,51 @@ else
     echo "      Add yourself manually:  sudo usermod -aG incus-admin <you>"
 fi
 
+# --- Kernel cgroup memory controller (Raspberry Pi) -------------------------
+# csb caps each sandbox's RAM and swap, which needs the cgroup v2 memory
+# controller. A normal PC has it on already; the default Raspberry Pi OS
+# kernel ships it off, so there we offer to enable it by editing the boot
+# cmdline. The whole block is skipped when the controller is already
+# active, so it never touches a normal host.
+if ! grep -qw memory /sys/fs/cgroup/cgroup.controllers 2>/dev/null; then
+    cmdline=""
+    for c in /boot/firmware/cmdline.txt /boot/cmdline.txt; do
+        [ -f "$c" ] && { cmdline="$c"; break; }
+    done
+    if [ -z "$cmdline" ]; then
+        echo "Note: the cgroup memory controller is disabled and no Raspberry Pi"
+        echo "      cmdline.txt was found. Enable it for your platform if you want"
+        echo "      per-sandbox memory/swap limits to take effect."
+    elif grep -q 'cgroup_enable=memory' "$cmdline"; then
+        echo "Note: $cmdline already enables the memory cgroup; reboot to activate it."
+    else
+        echo
+        echo "The kernel's cgroup memory controller is disabled, so claude-sandbox"
+        echo "cannot enforce per-sandbox RAM/swap limits. On a Raspberry Pi this is"
+        echo "fixed by adding 'cgroup_enable=memory cgroup_memory=1' to"
+        echo "    $cmdline"
+        echo "which is a boot file; the change needs a reboot to take effect."
+        do_edit=""
+        if [ -t 0 ]; then
+            printf "Append it now? [y/N] "
+            read -r reply || reply=""
+            case "$reply" in [yY]|[yY][eE][sS]) do_edit=1 ;; esac
+        else
+            echo "Non-interactive run; leaving $cmdline unchanged."
+        fi
+        if [ -n "$do_edit" ]; then
+            # cmdline.txt is a single space-separated line; append in place,
+            # preserving that single-line format, and keep a backup.
+            cp -a "$cmdline" "$cmdline.bak"
+            printf '%s cgroup_enable=memory cgroup_memory=1\n' \
+                "$(tr -d '\n' < "$cmdline")" > "$cmdline"
+            echo "Updated $cmdline (backup at $cmdline.bak). Reboot to apply."
+        else
+            echo "Left $cmdline unchanged. Add the options above and reboot when ready."
+        fi
+    fi
+fi
+
 # --- claude-sandbox files ---------------------------------------------------
 
 SOURCE="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"

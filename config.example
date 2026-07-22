@@ -34,8 +34,9 @@
 #
 # RAM ceiling. When hit, processes inside the sandbox are pushed to
 # swap (and OOM-killed if swap is also full). Accepts Incus suffixes
-# (KiB/MiB/GiB/...).
-#SANDBOX_MEMORY="16GiB"
+# (KiB/MiB/GiB/...). The default is deliberately conservative — a safety
+# belt that also fits an 8GB Pi — so bump it here for memory-hungry work.
+#SANDBOX_MEMORY="4GiB"
 #
 # Swap size cap (not a boolean). cgroup v2 keeps RAM and swap as
 # independent budgets, so capping RAM alone does not stop a runaway
@@ -43,12 +44,20 @@
 # only on/off, so this is applied via raw.lxc →
 # `lxc.cgroup2.memory.swap.max` and uses cgroup-native suffix syntax
 # (K/M/G/T = binary, no "iB").
-#SANDBOX_MEMORY_SWAP="8G"
+#SANDBOX_MEMORY_SWAP="2G"
 #
 # CPU allocation. Accepts a count ("4"), pinned cores ("0,1"), or a
 # soft percentage ("50%"). Default of "1" prioritizes host
 # responsiveness over build/test throughput in the sandbox.
 #SANDBOX_CPU="1"
+
+# Raspberry Pi: the conservative defaults already fit an 8 GB Pi 4/5. You
+# may want SANDBOX_CPU="4" for faster builds (the "1" default keeps the
+# host responsive), or lower SANDBOX_MEMORY on a 4 GB Pi. The memory/swap
+# caps need the cgroup memory controller, which the default Pi kernel
+# disables — install.sh offers to add `cgroup_enable=memory cgroup_memory=1`
+# to /boot/firmware/cmdline.txt (reboot to apply). See the README's
+# Raspberry Pi section. (create warns and runs unlimited if it's missing.)
 
 # Note: the Claude auth token is NOT configured here. Run
 # `claude-sandbox auth=<profile>` in the same chain as `create` to

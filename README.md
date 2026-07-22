@@ -55,6 +55,30 @@ Code, and the reporter (fetched from
 `create`s launch from that base in seconds. See [Base image
 caching](#base-image-caching) below.
 
+### Raspberry Pi (arm64)
+
+The tool is architecture-agnostic and runs on a Raspberry Pi 4/5 — handy
+when you want a dedicated, disposable box for hardware work (an ESP32 on
+the Pi's USB is passed straight into the sandbox with `dev=ttyUSB0`,
+exactly as on a PC). Raspberry Pi OS **Trixie** is Debian 13, so
+`install.sh`'s `apt install incus` works unchanged; the `images:` remote
+auto-selects the arm64 image and Claude Code installs its arm64 binary.
+One Pi-specific point, handled for you:
+
+- **The memory cgroup.** The sandbox's RAM/swap limits need the cgroup v2
+  memory controller, which the default Pi kernel ships disabled. When you
+  run `install.sh` on a Pi it detects this and offers to append
+  `cgroup_enable=memory cgroup_memory=1` to `/boot/firmware/cmdline.txt`
+  (with a backup; reboot to apply). Decline it and `create` still works —
+  it warns and leaves memory unlimited rather than failing.
+
+The conservative default limits (`SANDBOX_MEMORY=4GiB`,
+`SANDBOX_MEMORY_SWAP=2G`) already fit an 8 GB Pi out of the box. You may
+want `SANDBOX_CPU="4"` in `~/.config/claude-sandbox/config` for faster
+builds — the `1` default keeps the host responsive but makes ESP-IDF
+builds slow. An 8 GB model plus fast USB3/SSD storage (not an SD card) is
+recommended once you add real build workloads.
+
 ## Install
 
 Clone this repo and run the installer as root:
