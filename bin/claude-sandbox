@@ -169,13 +169,13 @@ Usage: $(basename "$0") <command>[=<arg>] [<command>[=<arg>]...]
 Commands run in the given order. The chain aborts on the first failure.
 
 Examples:
-  $(basename "$0") setup-token=mogul                            # one-time: mint and store a token
-  $(basename "$0") create auth=mogul shell
-  $(basename "$0") destroy create auth=mogul dev=ttyACM0 shell
-  $(basename "$0") create auth=mogul dev=ttyUSB0,ttyACM0 shell  # multiple devices
-  $(basename "$0") create auth=mogul dev shell                  # dev defaults to ttyACM0
-  $(basename "$0") create auth=mogul mount=~/Arduino/libraries shell  # extra host dir
-  $(basename "$0") create auth=mogul expose=5173 shell          # forward a dev-server port
+  $(basename "$0") setup-token=me                            # one-time: mint and store a token
+  $(basename "$0") create auth=me shell
+  $(basename "$0") destroy create auth=me dev=ttyACM0 shell
+  $(basename "$0") create auth=me dev=ttyUSB0,ttyACM0 shell  # multiple devices
+  $(basename "$0") create auth=me dev shell                  # dev defaults to ttyACM0
+  $(basename "$0") create auth=me mount=~/Arduino/libraries shell  # extra host dir
+  $(basename "$0") create auth=me expose=5173 shell          # forward a dev-server port
 
 Commands:
   create               Launch and provision the sandbox container.
@@ -193,7 +193,7 @@ Commands:
                        ~/.claudes/<profile>/sandbox-auth into the
                        sandbox. Requires an existing container, so
                        typically chained after create:
-                       \`create auth=mogul shell\`.
+                       \`create auth=me shell\`.
   setup-token=<profile>
                        Host-side one-time setup: prompts you to run
                        \`claude setup-token\` yourself and paste the
@@ -2034,13 +2034,13 @@ for token in "$@"; do
             ;;
         auth)
             if [ "$TOKEN_HAS_ARG" -ne 1 ] || [ -z "$TOKEN_ARG" ]; then
-                echo "Command 'auth' requires a profile, e.g. auth=mogul" >&2
+                echo "Command 'auth' requires a profile, e.g. auth=me" >&2
                 exit 1
             fi
             ;;
         setup-token)
             if [ "$TOKEN_HAS_ARG" -ne 1 ] || [ -z "$TOKEN_ARG" ]; then
-                echo "Command 'setup-token' requires a profile, e.g. setup-token=mogul" >&2
+                echo "Command 'setup-token' requires a profile, e.g. setup-token=me" >&2
                 exit 1
             fi
             ;;

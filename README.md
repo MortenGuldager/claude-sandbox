@@ -103,10 +103,10 @@ any running sandbox containers alone.
 
 ```sh
 cd /path/to/your/project
-claude-sandbox create auth=mogul   # launches a container, mounts the cwd at
+claude-sandbox create auth=me   # launches a container, mounts the cwd at
                                    # the same path inside, installs Claude
                                    # Code, starts the reporter, and writes
-                                   # the auth token for profile `mogul`
+                                   # the auth token for profile `me`
 claude-sandbox mount=~/Arduino/libraries  # (optional) extra host dir, same path inside
 claude-sandbox dev=ttyACM0   # (optional) pass a USB serial device through
 claude-sandbox expose=5173   # (optional) forward host 127.0.0.1:5173 -> container
@@ -119,7 +119,7 @@ claude-sandbox destroy       # ...or nuke the container entirely
 claude-sandbox full-destroy  # nuke the container AND this project's local skills + memory
 ```
 
-Commands chain — `claude-sandbox destroy create auth=mogul dev=ttyACM0 shell`
+Commands chain — `claude-sandbox destroy create auth=me dev=ttyACM0 shell`
 tears the container down and brings a fresh one up in one go. The
 chain aborts on the first failure.
 
@@ -144,13 +144,13 @@ config dir under `~/.claudes/<name>/` and drop the sandbox token in
 host-side `claude` CLI via `CLAUDE_CONFIG_DIR`:
 
 ```sh
-alias claude-mogul='CLAUDE_CONFIG_DIR=/home/you/.claudes/mogul claude'
+alias claude-me='CLAUDE_CONFIG_DIR=/home/you/.claudes/me claude'
 ```
 
 To mint and stash that token without hand-editing the file:
 
 ```sh
-claude-sandbox setup-token=mogul
+claude-sandbox setup-token=me
 ```
 
 This is a one-time host-side step. It tells you to run `claude
@@ -163,7 +163,7 @@ invalidated is up to Anthropic's side of the flow, not us.
 Pick which profile a sandbox uses with `auth=<name>`:
 
 ```sh
-claude-sandbox create auth=mogul shell   # fresh sandbox under the `mogul` profile
+claude-sandbox create auth=me shell   # fresh sandbox under the `me` profile
 claude-sandbox auth=work                 # switch the running sandbox to `work`
 ```
 
@@ -354,7 +354,7 @@ The quickest path is `claude-sandbox yolo`: it execs straight into
 stopping at a shell first. Since launching Claude that way is what
 nearly every sandbox session does, `yolo` is a peer of `shell` rather
 than something you type after it. It needs a running container, so
-chain it after `create` (`claude-sandbox create auth=mogul yolo`) or
+chain it after `create` (`claude-sandbox create auth=me yolo`) or
 run it standalone against an existing sandbox.
 
 Once you're at a `shell` prompt, there are two ways to invoke Claude

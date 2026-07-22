@@ -17,7 +17,7 @@ the original mouse-reporting investigation; the alt-screen part is at the bottom
 ## Symptom ("dum mode")
 
 While `claude` is running inside a claude-sandbox (Incus) container, attached from
-xfce4-terminal / xterm on the Xubuntu host:
+xfce4-terminal / xterm on a Linux desktop host:
 
 - Mouse text-selection no longer copies — double-click does nothing.
 - Mouse-wheel scrolling becomes slow / line-by-line instead of normal terminal scrollback.
@@ -62,9 +62,9 @@ mounted into a sandbox:
 
 | Inside container | Host path |
 |---|---|
-| `/home/mogul/tmp/bar` (project dir) | same |
-| `~/.claude/projects/<slug>/memory` | `/home/mogul/.config/claude-sandbox/memory/<slug>/` |
-| `~/.claude/skills` | `/home/mogul/.config/claude-sandbox/skills/` |
+| `/home/you/tmp/bar` (project dir) | same |
+| `~/.claude/projects/<slug>/memory` | `/home/you/.config/claude-sandbox/memory/<slug>/` |
+| `~/.claude/skills` | `/home/you/.config/claude-sandbox/skills/` |
 
 `~/.claude.json` (the file with `cachedGrowthBookFeatures`) is **NOT** in that list. It lives
 on each container's ephemeral rootfs and dies on `destroy`. Consequences:
