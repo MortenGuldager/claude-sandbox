@@ -132,8 +132,13 @@ resolve_reporter_sha() {
         return 0
     fi
 
-    echo "Could not resolve $REPORTER_REPO @ $REPORTER_REF (check network)." >&2
-    echo "Set REPORTER_REF to a specific commit SHA to skip API resolution." >&2
+    echo "Could not resolve $REPORTER_REPO @ $REPORTER_REF." >&2
+    for t in curl jq; do
+        command -v "$t" >/dev/null 2>&1 || \
+            echo "  '$t' is not installed on the host — install it (e.g. apt install $t)." >&2
+    done
+    echo "  Otherwise check network access to api.github.com, or set" >&2
+    echo "  REPORTER_REF to a specific commit SHA to skip API resolution." >&2
     return 1
 }
 

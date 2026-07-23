@@ -38,6 +38,23 @@ if ! command -v incus >/dev/null 2>&1; then
     apt-get install -y incus
 fi
 
+# csb needs a couple of host-side tools beyond incus: curl fetches the
+# reporter commit from the GitHub API and jq parses the SHA out of it. A
+# fresh Raspberry Pi OS ships neither, and a missing jq surfaces at
+# `create` time as a misleading "check network" error (the failed jq is
+# swallowed), so make sure both are present up front.
+host_deps=()
+for t in curl jq; do command -v "$t" >/dev/null 2>&1 || host_deps+=("$t"); done
+if [ "${#host_deps[@]}" -gt 0 ]; then
+    echo "Installing host prerequisites: ${host_deps[*]}"
+    if ! command -v apt-get >/dev/null 2>&1; then
+        echo "  apt-get is unavailable; install ${host_deps[*]} manually and re-run." >&2
+        exit 1
+    fi
+    apt-get update
+    apt-get install -y "${host_deps[@]}"
+fi
+
 # An initialized incus has at least one storage pool. Empty output means
 # we have never run `incus admin init` (or any equivalent) on this host.
 if ! incus storage list --format csv 2>/dev/null | grep -q .; then
