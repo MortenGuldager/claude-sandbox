@@ -214,13 +214,14 @@ clashing with container OS paths (`/etc`, `/usr`, etc.).
 Sandboxes are deliberately disposable, but Claude's own learned context
 shouldn't be. Both skills and memory come in two tiers, and the split is
 what keeps one project's sandbox from bleeding into another's. `create`
-auto-mounts four host directories:
+auto-mounts five host directories:
 
 ```
 ~/.config/claude-sandbox/skills/<slug>/   -> ~/.claude/skills/                  (local, this project, read-write)
 ~/.config/claude-sandbox/skills-global/   -> ~/.claude/skills/<name>/           (global, every sandbox, read-only)
 ~/.config/claude-sandbox/memory/<slug>/   -> ~/.claude/projects/<slug>/memory/  (local, this project, read-write)
 ~/.config/claude-sandbox/memory-global/   -> ~/.claude/global-memory/           (global, every sandbox, read-only)
+~/.config/claude-sandbox/output-styles/   -> ~/.claude/output-styles/           (global, every sandbox, read-only)
 ```
 
 `<slug>` is the project realpath with `/` replaced by `-` — the same
@@ -282,6 +283,36 @@ guidance ("local vs. global", "when is something a skill vs. memory",
 why") loads on demand rather than every session. The file is
 regenerated on every `create` so it tracks the tool version; copy the
 directory under a different name if you want a custom variant.
+
+### Output style
+
+`create` also seeds a managed Claude Code output style, `ste100.md`, into
+`output-styles/` and selects it in `settings.json`. It is a concision
+style: answer first, one idea per sentence, common words over Latinate
+ones, no preamble, no closing summary, no bold-sprinkled pseudo-headings.
+The name nods to ASD-STE100 (Simplified Technical English) and follows it
+in spirit only — the real standard is built on a ~900-word approved
+dictionary that is neither shipped here nor needed to get concise output.
+
+The style is `keep-coding-instructions: true`, so it adds a register on
+top of Claude Code's default coding instructions instead of replacing
+them. Change the active style with `SANDBOX_OUTPUT_STYLE` in the config
+(blank leaves Claude Code's default), and note that the value is the
+style's `name:` field, not its filename. A name no style in the directory
+declares is refused with a warning rather than written, since Claude Code
+would otherwise fall back to the default without saying so.
+
+The style ships as `share/output-styles/ste100.md`, so editing the rules
+is an ordinary markdown edit; `create` copies it out, overwriting the
+host-side copy every time, like the managed skill. To use it outside a
+sandbox, copy that file into your own `~/.claude/output-styles/` and set
+`"outputStyle": "STE100"` in `~/.claude/settings.json`. For a variant,
+drop another `.md` in the host-side directory and point
+`SANDBOX_OUTPUT_STYLE` at its name. Styles are global only, with no local
+tier and no write access from inside the sandbox: how Claude writes is a
+standing preference of yours, not something a sandbox should redefine for
+itself. `/output-style` inside a session still switches style for that
+session, but `create` resets the setting to the configured value.
 
 ### Timezone
 
@@ -564,12 +595,37 @@ Claude-specific (`csb-` prefix).
 
 ```
 bin/claude-sandbox    # host-side CLI
+share/                # prose payloads the CLI writes into a sandbox
+  claude/CLAUDE.md              # always-loaded stub
+  hooks/                        # SessionStart hook script
+  output-styles/ste100.md       # concision output style
+  skills/claude-sandbox/        # managed skill
 config.example        # documented settings
 install.sh / uninstall.sh
+tests/                # characterisation tests, no Incus needed
 ```
+
+`share/` is resolved relative to the CLI (`bin/` next to `share/`), so it
+works both from a checkout and from `/opt/claude-sandbox`. Files there may
+use `{{CONFIG_DIR}}`, `{{PROJECT_SLUG}}`, and `{{SANDBOX_CLAUDE_D}}`;
+anything else in `{{...}}` is an error at `create` time rather than a
+literal placeholder shipped into a sandbox. Payloads that need real
+branching stay as generating code in `bin/claude-sandbox` — a
+substitution-only template cannot express them.
 
 The reporter is no longer vendored here; `create` fetches it from
 [`MortenGuldager/claude-status-reporter`][reporter].
+
+## Tests
+
+`tests/run.sh` pins what a sandbox receives: the seeded output style, the
+`SessionStart` hook, the generated `CLAUDE.d` docs, and the managed skill
+are compared byte-for-byte against `tests/golden/`, alongside behavioural
+checks on style-name lookup, the `settings.json` merge, and installer
+completeness. It stubs `incus`, so it runs anywhere — including inside a
+sandbox — but it cannot tell you that `create` works. See
+`tests/README.md` for what is and isn't covered, and for how to accept an
+intentional content change.
 
 ## License
 

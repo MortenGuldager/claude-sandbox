@@ -16,14 +16,30 @@
 # mounted at the same path inside the sandbox as on the host — `create`
 # mounts the cwd implicitly, and `mount=<path>` adds more.
 
-# Note: `create` also auto-mounts two persistence directories so Claude
+# Note: `create` also auto-mounts five persistence directories so Claude
 # state survives sandbox destroy/create cycles, with no setting needed:
-#   ~/.config/claude-sandbox/skills/         -> /home/ubuntu/.claude/skills/
-#       (user-defined skills, shared across every sandbox)
+#   ~/.config/claude-sandbox/skills/<slug>/  -> /home/ubuntu/.claude/skills/
+#       (skills Claude authors here; this project only, read-write)
+#   ~/.config/claude-sandbox/skills-global/  -> /home/ubuntu/.claude/skills/<name>/
+#       (skills you promoted; every sandbox, read-only)
 #   ~/.config/claude-sandbox/memory/<slug>/  -> /home/ubuntu/.claude/projects/<slug>/memory/
-#       (auto-memory, scoped to this project's host path)
+#       (auto-memory, scoped to this project's host path, read-write)
+#   ~/.config/claude-sandbox/memory-global/  -> /home/ubuntu/.claude/global-memory/
+#       (standing cross-project rules; every sandbox, read-only)
+#   ~/.config/claude-sandbox/output-styles/  -> /home/ubuntu/.claude/output-styles/
+#       (Claude Code output styles; every sandbox, read-only)
 # `<slug>` is the project realpath with `/` replaced by `-`, matching
 # Claude Code's own naming. The host dirs are created on first `create`.
+
+# Output style activated in every sandbox, named by the style's `name:`
+# field rather than its filename. `create` seeds a managed concision
+# style (ste100.md, name STE100) into output-styles/ and writes this
+# value to the sandbox's settings.json, overriding whatever a previous
+# session picked with `/output-style`. Set it to another style's name for
+# a variant of your own, or to "" to leave Claude Code's default style
+# active. A name that no style in the directory declares is refused with
+# a warning. See the README's "Output style" section.
+#SANDBOX_OUTPUT_STYLE="STE100"
 
 # Resource limits applied at `create` time. A runaway agent inside the
 # sandbox can otherwise exhaust the host's RAM, fill all host swap, and

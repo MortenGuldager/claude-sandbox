@@ -17,6 +17,16 @@ set -euo pipefail
 SCRIPT_PATH="$(readlink -f "$0")"
 SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
 
+# Payloads that are mostly prose — the output style, the SessionStart
+# hook, the seeded skill, the CLAUDE.md stub — live as files next to the
+# installed script instead of inside it, so a wording fix is a one-line
+# edit in a markdown file rather than a hunt through 2000 lines of bash.
+# Both layouts resolve identically, `bin/` next to `share/`:
+#   /opt/claude-sandbox/bin/claude-sandbox -> /opt/claude-sandbox/share
+#   <checkout>/bin/claude-sandbox          -> <checkout>/share
+# The override exists for tests and for running from an unusual layout.
+ASSET_DIR="${CLAUDE_SANDBOX_ASSET_DIR:-$(dirname "$SCRIPT_DIR")/share}"
+
 # Bumped manually when build logic changes in a way not captured by the
 # other hash inputs (e.g. we add a new step that doesn't affect any
 # tracked file). Forces a rebuild.
@@ -54,6 +64,14 @@ SANDBOX_IMAGE="images:ubuntu/24.04"
 SANDBOX_MEMORY="4GiB"
 SANDBOX_MEMORY_SWAP="2G"
 SANDBOX_CPU="1"
+
+# Claude Code output style activated in every sandbox, by its `name:`
+# field (not its filename). `create` seeds the managed STE100 style into
+# the global output-styles tier and writes this value to settings.json.
+# Blank disables the setting, leaving Claude Code's default style. A name
+# no style declares is refused with a warning rather than written, since
+# Claude Code would silently fall back to the default.
+SANDBOX_OUTPUT_STYLE="STE100"
 
 # Upstream source for the status reporter. `create` fetches this repo at
 # the resolved ref into the sandbox and runs its install.sh during the
@@ -238,11 +256,13 @@ Commands:
                        so a later \`start\` resumes it (no-op if already
                        stopped). Use \`destroy\` to also wipe disk.
   destroy              Delete the sandbox container (no-op if absent).
-                       Local and global skills/memory survive.
+                       Local and global skills/memory and the output
+                       styles survive.
   full-destroy         Delete the container AND wipe this project's LOCAL
                        skills and memory on the host (the per-project state
                        \`destroy create\` preserves). Prompts first; not
-                       reversible. Global skills/memory are left untouched.
+                       reversible. Global skills/memory and output styles
+                       are left untouched.
   bases                List cached base images with age and status.
   rebuild-base         Force a rebuild of the current base image.
   gc                   Delete cached base images that don't match the
@@ -417,6 +437,68 @@ SANDBOX_CLAUDE_D="/home/ubuntu/.claude/CLAUDE.d"
 # Reads content from stdin and writes it into the sandbox as user ubuntu,
 # creating parent directories as needed. Used for the CLAUDE.md stub and
 # every CLAUDE.d/ file.
+# Emits an asset from $ASSET_DIR with `{{PLACEHOLDER}}` substitution.
+#
+# Deliberately not a templating engine: three placeholders and a `sed`
+# whitelist. `envsubst` would need a new host package and would also eat
+# the literal `$HOME` these files use as prose; eval-ing a heredoc would
+# execute the backticks markdown is full of; mustache/jinja would add a
+# python or binary dependency for three substitutions. Files that need
+# real branching (git identity, mount role, optional timezone lines) stay
+# as generating code in the write_*_doc functions — a substitution-only
+# engine cannot express them, and faking it with template variants is
+# worse than the bash.
+#
+# All-or-nothing: nothing is emitted unless the file exists and every
+# placeholder resolved, so a typo fails at `create` time instead of
+# landing as a broken doc inside a sandbox.
+render_asset() {
+    # Separate statements on purpose: bash creates every name in a single
+    # `local` as unset before assigning, so `local a="$1" b="$a"` trips
+    # `set -u`.
+    local rel="$1" path out slug
+    path="$ASSET_DIR/$rel"
+    if [ ! -f "$path" ]; then
+        echo "Error: missing asset '$rel'." >&2
+        echo "       Looked in: $ASSET_DIR" >&2
+        echo "       Re-run install.sh, or point CLAUDE_SANDBOX_ASSET_DIR at a checkout's share/." >&2
+        return 1
+    fi
+
+    slug="$(project_slug_for_path "$REPO_DIR")"
+    out="$(sed \
+        -e "s|{{CONFIG_DIR}}|$(sed_escape "$CONFIG_DIR")|g" \
+        -e "s|{{PROJECT_SLUG}}|$(sed_escape "$slug")|g" \
+        -e "s|{{SANDBOX_CLAUDE_D}}|$(sed_escape "$SANDBOX_CLAUDE_D")|g" \
+        "$path")"
+
+    if printf '%s' "$out" | grep -q '{{'; then
+        echo "Error: unresolved placeholder in asset '$rel':" >&2
+        printf '%s' "$out" | grep -o '{{[^}]*}}' | sort -u | sed 's/^/       /' >&2
+        return 1
+    fi
+
+    printf '%s\n' "$out"
+}
+
+# Escapes the characters that are special on the right-hand side of the
+# `sed s|...|...|` above: the delimiter and `&` (the whole match).
+sed_escape() {
+    printf '%s' "$1" | sed 's/[&|\\]/\\&/g'
+}
+
+# Renders an asset to a host file, via a temp file so a failed render
+# leaves the previous content in place rather than truncating it.
+render_asset_to() {
+    local rel="$1" dest="$2" tmp
+    tmp="$(mktemp)"
+    if ! render_asset "$rel" > "$tmp"; then
+        rm -f "$tmp"
+        return 1
+    fi
+    mv "$tmp" "$dest"
+}
+
 write_sandbox_user_file() {
     local path="$1" dir
     dir="$(dirname "$path")"
@@ -427,28 +509,9 @@ write_sandbox_user_file() {
 }
 
 write_sandbox_claude_md_stub() {
-    write_sandbox_user_file "$SANDBOX_CLAUDE_MD" <<EOF
-# Sandbox runtime environment
-
-You are running inside a \`claude-sandbox\` Incus container, not on the
-host. Runtime details specific to how this sandbox was launched —
-mounted project path, forwarded USB devices, forwarded network ports —
-live as individual files in \`$SANDBOX_CLAUDE_D/\`. Read every file
-there at the start of the session, and re-read it if you suspect the
-environment has changed.
-
-Your world here is deliberately narrow: the container is disposable, and
-almost nothing you change outside the mounted project survives a rebuild.
-What does survive, and why the isolation is intentional, is spelled out
-in \`$SANDBOX_CLAUDE_D/02-persistence.md\` and the \`claude-sandbox\`
-skill. Read them before assuming a change will persist or reach beyond
-this project.
-
-A small set of always-on rules and facts shared by *every* sandbox may
-live in \`~/.claude/global-memory/\`. If a \`MEMORY.md\` exists there,
-read it at session start and treat it as standing, cross-project user
-preference.
-EOF
+    local content
+    content="$(render_asset claude/CLAUDE.md)"
+    printf '%s\n' "$content" | write_sandbox_user_file "$SANDBOX_CLAUDE_MD"
 }
 
 write_sandbox_environment_doc() {
@@ -541,13 +604,14 @@ write_persistence_doc() {
     {
         echo "# Persistent Claude state across sandboxes"
         echo
-        echo "This container is disposable: \`claude-sandbox destroy create\` wipes its OS, installed packages, and anything under \`\$HOME\` that isn't a mount below. That narrowness is deliberate — it stops one project's sandbox from silently altering another's. Only these survive a rebuild, and only the two **global** tiers cross between projects:"
+        echo "This container is disposable: \`claude-sandbox destroy create\` wipes its OS, installed packages, and anything under \`\$HOME\` that isn't a mount below. That narrowness is deliberate — it stops one project's sandbox from silently altering another's. Only these survive a rebuild, and only the **global** tiers cross between projects:"
         echo
         echo "- **Project tree** — the mounted repo, same path as on the host. Commits and build output persist there."
         echo "- **Local skills** \`~/.claude/skills/\` — writable, **this project only** (host: \`$CONFIG_DIR/skills/$slug/\`). Skills you author land here and are invisible to other projects."
         echo "- **Local memory** \`~/.claude/projects/$slug/memory/\` — writable, **this project only** (host: \`$CONFIG_DIR/memory/$slug/\`). \`MEMORY.md\` is the always-loaded index."
         echo "- **Global skills** — **read-only**, shared by every sandbox. They show up as extra entries in \`~/.claude/skills/\` but you cannot edit them from here (host: \`$CONFIG_DIR/skills-global/\`)."
         echo "- **Global memory** \`~/.claude/global-memory/\` — **read-only**, shared by every sandbox; always-on rules/facts. Read its \`MEMORY.md\` at session start (host: \`$CONFIG_DIR/memory-global/\`)."
+        echo "- **Global output styles** \`~/.claude/output-styles/\` — **read-only**, shared by every sandbox (host: \`$CONFIG_DIR/output-styles/\`). The active one is set in \`settings.json\` by \`create\`; it shapes how you write, so treat it as standing user preference."
         echo
         echo "You write only to the two *local* tiers. Making something global is the user's call alone: they move it, host-side, from a local dir into the matching global dir. You cannot promote it yourself — that gate is exactly why your reach is limited. If a rule ought to apply everywhere, write it to local memory and *tell the user* it's a promotion candidate."
         echo
@@ -626,27 +690,11 @@ seed_claude_first_run_state() {
 seed_global_memory_hook() {
     local hook_script="/home/ubuntu/.claude/hooks/inject-global-memory.sh"
 
-    # Quoted heredoc: the script's own $HOME/$index must survive to the
-    # container untouched, not expand here on the host.
-    write_sandbox_user_file "$hook_script" <<'EOF'
-#!/usr/bin/env bash
-# SessionStart hook: inject the global-memory index into context. Global
-# memory is a read-only, cross-project mount that Claude Code does not
-# auto-load, so we push its MEMORY.md in here. Emits the documented
-# hookSpecificOutput.additionalContext JSON (plain stdout is not added to
-# context). No-op when the index is absent or empty.
-set -euo pipefail
-index="$HOME/.claude/global-memory/MEMORY.md"
-[ -s "$index" ] || exit 0
-header="# Global sandbox memory (always-on, cross-project, read-only)
-
-Standing rules and facts shared by every claude-sandbox. Treat as user
-preference. This is the index; read the referenced files under
-~/.claude/global-memory/ as they become relevant."
-jq -Rs --arg h "$header" \
-    '{hookSpecificOutput:{hookEventName:"SessionStart",additionalContext:($h + "\n\n" + .)}}' \
-    "$index"
-EOF
+    # The hook is a real shell script, so it lives as one under
+    # share/hooks/ where shellcheck and an editor can see it.
+    local content
+    content="$(render_asset hooks/inject-global-memory.sh)"
+    printf '%s\n' "$content" | write_sandbox_user_file "$hook_script"
     incus exec "$CONTAINER_NAME" -- sudo -u ubuntu chmod 0755 "$hook_script"
 
     # Merge the hook into settings.json without disturbing what
@@ -955,7 +1003,7 @@ cmd_create() {
     echo "Mounting project directory at $REPO_DIR..."
     attach_mount "$REPO_DIR"
 
-    echo "Mounting persistent skills and memory directories..."
+    echo "Mounting persistent skills, memory, and output-style directories..."
     attach_claude_persistence_mounts
 
     echo "Starting sandbox..."
@@ -1007,6 +1055,11 @@ cmd_create() {
 
     echo "Installing SessionStart hook to auto-load global memory..."
     seed_global_memory_hook
+
+    if [ -n "$SANDBOX_OUTPUT_STYLE" ]; then
+        echo "Selecting output style: $SANDBOX_OUTPUT_STYLE"
+    fi
+    activate_output_style
 
     echo "Sandbox is ready."
 }
@@ -1184,6 +1237,12 @@ attach_mount() {
 #           global -> ~/.claude/skills/<name>/    (ro, every sandbox)
 #   memory  local  -> ~/.claude/projects/<slug>/memory/ (rw, this project)
 #           global -> ~/.claude/global-memory/    (ro, every sandbox)
+#   styles  global -> ~/.claude/output-styles/    (ro, every sandbox)
+#
+# Output styles have no local tier on purpose: a style is a standing
+# register for how Claude writes, not per-project knowledge, and letting
+# a sandbox rewrite its own output style from inside is not a power worth
+# granting.
 #
 # Claude writes only to the LOCAL tiers, which are per-project, so a
 # skill drafted or a fact learned in one project never surfaces in
@@ -1205,18 +1264,21 @@ attach_claude_persistence_mounts() {
     local skills_global="$CONFIG_DIR/skills-global"
     local memory_local="$CONFIG_DIR/memory/$slug"
     local memory_global="$CONFIG_DIR/memory-global"
+    local styles_global="$CONFIG_DIR/output-styles"
 
     # Migration: older sandboxes kept a single shared skills dir directly
     # at $CONFIG_DIR/skills/. Every skill there is "global" under this
     # model, so lift any that still sit there into skills-global/.
     migrate_flat_global_skills "$CONFIG_DIR/skills" "$skills_global"
 
-    mkdir -p "$skills_local" "$skills_global" "$memory_local" "$memory_global"
+    mkdir -p "$skills_local" "$skills_global" "$memory_local" "$memory_global" \
+             "$styles_global"
 
     # Seed the managed global skill first, so it exists on disk before the
     # global-skill mounts are enumerated below — otherwise on a first-ever
     # create it wouldn't mount into the sandbox until the next create.
     seed_claude_sandbox_skill "$skills_global"
+    seed_ste100_output_style "$styles_global"
 
     # Local, writable skills — this project only. Mounted at the native
     # personal-skills path so Claude Code discovers them and can draft here.
@@ -1242,6 +1304,15 @@ attach_claude_persistence_mounts() {
     incus config device add "$CONTAINER_NAME" claude-memory-global disk \
         source="$memory_global" \
         path="/home/ubuntu/.claude/global-memory" \
+        readonly=true >/dev/null
+
+    # Global, read-only output styles — the native path Claude Code scans
+    # for user styles, so the seeded STE100 style (and anything else the
+    # user drops in host-side) shows up in `/output-style` in every sandbox.
+    incus config device remove "$CONTAINER_NAME" claude-output-styles 2>/dev/null || true
+    incus config device add "$CONTAINER_NAME" claude-output-styles disk \
+        source="$styles_global" \
+        path="/home/ubuntu/.claude/output-styles" \
         readonly=true >/dev/null
 }
 
@@ -1311,97 +1382,93 @@ attach_global_skill_mounts() {
 # use a skill vs. memory, how to author each, how promotion works, and
 # what survives `destroy create`. It is a global skill (not a CLAUDE.d
 # note) so it lazy-loads only when relevant, keeping startup context lean.
-# Seeded into skills-global/ and always overwritten on `create` so the
-# guidance tracks the tool version; users who want to customise should
-# copy to a different directory name (the file itself documents this).
+# Body: share/skills/claude-sandbox/SKILL.md. Seeded into skills-global/
+# and always overwritten on `create` so the guidance tracks the tool
+# version; users who want to customise should copy to a different
+# directory name (the file itself documents this).
 seed_claude_sandbox_skill() {
     local skills_global="$1"
     local skill_dir="$skills_global/claude-sandbox"
-    local skill_file="$skill_dir/SKILL.md"
-    local slug
-    slug="$(project_slug_for_path "$REPO_DIR")"
     mkdir -p "$skill_dir"
-    cat > "$skill_file" <<EOF
----
-name: claude-sandbox
-description: Conventions for the claude-sandbox container's persistent skills/memory infrastructure — the local vs. global tiers, when to use which, how to author each, how to promote something to global, and what survives \`destroy create\`. Load before authoring a skill, writing memory, or troubleshooting files that disappeared after a sandbox rebuild.
----
+    render_asset_to skills/claude-sandbox/SKILL.md "$skill_dir/SKILL.md"
+}
 
-# How the claude-sandbox persistence layer works
+# Writes the managed STE100 output style into the global output-styles
+# tier. The point is concision: Claude Code's default register produces
+# preamble, closing summaries, bold-sprinkled pseudo-headings, and hedged
+# paragraphs, all of which cost reading time and tokens. The style takes
+# ASD-STE100 in spirit (short sentences, common words, one idea each) but
+# not by the letter — the real standard needs its ~900-word approved
+# dictionary, which we neither ship nor need for this purpose.
+#
+# `keep-coding-instructions: true` matters: without it the style replaces
+# Claude Code's default coding instructions instead of adding to them.
+#
+# Body: share/output-styles/ste100.md. Always overwritten on `create` so
+# the style tracks the tool version; drop a differently-named .md in the
+# host-side dir for a variant and point SANDBOX_OUTPUT_STYLE at its name.
+seed_ste100_output_style() {
+    local styles_global="$1"
+    mkdir -p "$styles_global"
+    render_asset_to output-styles/ste100.md "$styles_global/ste100.md"
+}
 
-> This file is a global read-only skill, regenerated by \`claude-sandbox create\` on every run. You cannot edit it from inside the sandbox, and local edits would be overwritten anyway. To customise, copy the directory to a different name (e.g. \`claude-sandbox.local/\`) under a *local* skills dir.
+# True if $2 names an output style present in the host dir $1 — matched
+# either by filename (<name>.md) or by the `name:` frontmatter field,
+# which is what Claude Code actually keys the setting on. Frontmatter
+# wins in Claude Code when the two disagree, so both are accepted here.
+output_style_exists() {
+    local styles_dir="$1" name="$2" f declared
+    [ -d "$styles_dir" ] || return 1
+    [ -f "$styles_dir/$name.md" ] && return 0
+    for f in "$styles_dir"/*.md; do
+        [ -f "$f" ] || continue
+        # Frontmatter only (a body line could also start with "name:"),
+        # then compared as a string rather than matched as a pattern — a
+        # style name may contain regex metacharacters.
+        declared="$(head -n 10 "$f" | sed -n 's/^name:[[:space:]]*//p' | head -n1)"
+        declared="${declared%"${declared##*[![:space:]]}"}"   # trailing space
+        declared="${declared#\"}"
+        declared="${declared%\"}"
+        [ -n "$declared" ] || continue
+        [ "$declared" = "$name" ] && return 0
+    done
+    return 1
+}
 
-You are running inside an Incus container managed by \`claude-sandbox\`. The container is disposable: \`claude-sandbox destroy create\` wipes its OS, packages, and everything under \`\$HOME\` that isn't one of the mounts below. That narrowness is deliberate — it is what keeps one project's sandbox from silently changing another's. Five things survive a rebuild:
+# Selects the output style in ~/.claude/settings.json. The style file
+# alone does nothing: Claude Code only applies a style when settings name
+# it, and `/output-style` writes that same key. Runs after
+# seed_claude_first_run_state so it merges into the settings that already
+# exist, and re-runs on every `create` — so a style picked interactively
+# in an earlier sandbox is reset to the configured one on rebuild.
+# An unknown name would be a silent fallback to the default style, so it
+# is refused loudly instead of written.
+activate_output_style() {
+    local name="$SANDBOX_OUTPUT_STYLE"
 
-1. **The mounted project directory** — same path on host and sandbox, read-write. Commits, build artefacts, and files you drop in the tree persist on the host.
-2. **Local skills** — \`~/.claude/skills/\`, read-write, **this project only** (host: \`$CONFIG_DIR/skills/$slug/\`). Skills you author land here.
-3. **Local memory** — \`~/.claude/projects/$slug/memory/\`, read-write, **this project only** (host: \`$CONFIG_DIR/memory/$slug/\`). \`MEMORY.md\` is the always-loaded index. \`<slug>\` is the project realpath with \`/\` replaced by \`-\`, matching Claude Code's own convention.
-4. **Global skills** — **read-only**, shared by *every* sandbox. They appear as extra entries alongside your local ones in \`~/.claude/skills/\`, but you cannot edit them from here (host: \`$CONFIG_DIR/skills-global/\`).
-5. **Global memory** — \`~/.claude/global-memory/\`, **read-only**, shared by every sandbox; always-on rules and facts. Its \`MEMORY.md\` is auto-injected into context at session start by a \`SessionStart\` hook (and pointed at by the CLAUDE.md stub as a backstop), so it reaches you without a manual read (host: \`$CONFIG_DIR/memory-global/\`).
+    if [ -n "$name" ] && ! output_style_exists "$CONFIG_DIR/output-styles" "$name"; then
+        echo "Warning: no output style named '$name' in $CONFIG_DIR/output-styles;" >&2
+        echo "         leaving Claude Code's default style active." >&2
+        return 0
+    fi
 
-Everything else under \`~/.claude/projects/$slug/\` (sessions, todos) is ephemeral — per-conversation state, not knowledge to carry forward. The container OS (\`/etc\`, \`/usr\`, \`/var\`, installed packages, systemd units other than the reporter) is wiped on \`destroy\`.
-
-## Why your world is this narrow
-
-The isolation is the design, not a bug. You write only to the two **local** tiers, and local means *this project's host path only*. A skill you draft or a fact you learn here is invisible to every other project's sandbox. The two **global** tiers are the only things that cross projects, and inside the sandbox they are read-only. So nothing you do can widen its own blast radius — you cannot make a change that silently reaches the user's other work. That is the guarantee the tiers buy.
-
-## Promotion: how something becomes global
-
-You cannot promote anything yourself. Promotion is a host-side move by the user: they move the skill dir or memory file from a local tier into the matching global tier —
-
-- skill: \`$CONFIG_DIR/skills/$slug/<name>/\` → \`$CONFIG_DIR/skills-global/<name>/\`
-- memory: \`$CONFIG_DIR/memory/$slug/<file>\` → \`$CONFIG_DIR/memory-global/<file>\`
-
-Then it re-mounts read-only into every sandbox on the next \`create\`. So the right move when you believe something should be global is: **write it to the local tier, then tell the user it's a promotion candidate and let them decide.**
-
-## Skills vs. memory — which to use
-
-Use a **skill** when the content is a *procedure or recipe* and you can write a precise \`description\` naming the trigger ("how to set up an Incus VM", "how to debug systemd unit failures"). Skills are lazy-loaded by description match — they cost nothing when irrelevant.
-
-Use **memory** when the content is a *fact about the user, project, or domain* ("user is a senior Go dev", "release freeze starts 2026-03-05", "auth rewrite is driven by legal"). \`MEMORY.md\` is always loaded — keep it terse.
-
-Rough rule of thumb: "how to…" → skill; "X is…" or "we decided…" → memory. Cuts across the other axis: "does this apply to just this project or everywhere?" decides local vs. global — but you only ever *write* local; global is the user's promotion.
-
-## Authoring a skill
-
-Create it under your local skills dir, \`~/.claude/skills/<kebab-name>/SKILL.md\`:
-
-\`\`\`markdown
----
-name: <kebab-name>
-description: <one sentence describing exactly when this skill should fire — be specific; vague descriptions never match>
----
-
-# <human-readable title>
-
-<body — loaded into context only when the description matches>
-\`\`\`
-
-The \`description\` field is the entire gate. "How to do X in environment Y" beats "X helpers". A vague description never loads.
-
-## Authoring memory
-
-Follow the auto-memory rules in the main system prompt. Local memory files land in \`~/.claude/projects/$slug/memory/\` (host: \`$CONFIG_DIR/memory/$slug/\`). \`MEMORY.md\` is the always-loaded index; topic files are pointed to from it. Keep index lines under ~150 chars — past 200 they get truncated. Global memory (read-only here) works the same way but its index lives in \`~/.claude/global-memory/MEMORY.md\`.
-
-## When something doesn't persist
-
-If a file is gone after \`destroy create\`, it was outside the five layers above:
-
-- Files under \`~/.claude/projects/$slug/\` outside \`memory/\` — sessions and todos go away on purpose.
-- A write into a **global** tier — it's read-only inside the sandbox; the write either failed or landed in an ephemeral overlay. Author locally instead.
-- Anything under \`/etc\`, \`/usr\`, \`/opt\`, \`/var\` — container OS, ephemeral.
-- Files in \`\$HOME\` outside the mounted dirs — ephemeral.
-- Packages installed with \`apt\` / \`pip\` / \`npm -g\` — ephemeral. To survive, bake them into the base image (see \`build_base_image\` in \`bin/claude-sandbox\`) or install per-project under the mounted project tree.
-
-## Host-side layout (for the user)
-
-- Local skills:  \`$CONFIG_DIR/skills/$slug/\`
-- Global skills: \`$CONFIG_DIR/skills-global/\`
-- Local memory:  \`$CONFIG_DIR/memory/$slug/\`
-- Global memory: \`$CONFIG_DIR/memory-global/\`
-
-The user edits, prunes, and promotes these directly between sandbox lifecycles — they're just files on the host. \`claude-sandbox full-destroy\` deletes the container *and* wipes this project's **local** skills and memory (\`$CONFIG_DIR/skills/$slug/\` and \`$CONFIG_DIR/memory/$slug/\`); the shared global tiers are never touched. Plain \`destroy\` leaves everything intact.
-EOF
+    # shellcheck disable=SC2016
+    incus exec "$CONTAINER_NAME" -- sudo -u ubuntu -H bash -c '
+        set -e
+        style=$1
+        settings=~/.claude/settings.json
+        tmp=$(mktemp)
+        mkdir -p ~/.claude
+        [ -f "$settings" ] || echo "{}" > "$settings"
+        if [ -n "$style" ]; then
+            jq --arg s "$style" ".outputStyle = \$s" "$settings" > "$tmp"
+        else
+            jq "del(.outputStyle)" "$settings" > "$tmp"
+        fi
+        mv "$tmp" "$settings"
+        rm -f "$tmp"
+    ' _ "$name"
 }
 
 # Bind-mounting under `~/.claude/` causes Incus to auto-create the
@@ -1886,7 +1953,7 @@ cmd_full_destroy() {
         local t
         for t in "${targets[@]}"; do echo "  $t"; done
         echo "It survives a normal 'destroy create'; removal is not reversible."
-        echo "(Global skills/memory in $CONFIG_DIR/skills-global and $CONFIG_DIR/memory-global are left untouched.)"
+        echo "(The global tiers are left untouched: $CONFIG_DIR/skills-global, $CONFIG_DIR/memory-global, $CONFIG_DIR/output-styles.)"
         printf 'Delete it? [y/N] '
         local reply
         read -r reply || reply=""

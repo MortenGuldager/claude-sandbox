@@ -135,6 +135,19 @@ install -m 0644 "$SOURCE/config.example" "$PREFIX/config.example"
 install -m 0644 "$SOURCE/README.md"      "$PREFIX/README.md"
 install -m 0644 "$SOURCE/LICENSE"        "$PREFIX/LICENSE"
 
+# share/ holds the prose payloads the CLI writes into a sandbox (output
+# style, SessionStart hook, seeded skill, CLAUDE.md stub). The CLI finds
+# them relative to itself, as $PREFIX/share, so this tree must ship with
+# it — without it, `create` aborts with a missing-asset error. Cleared
+# first so a renamed or deleted asset does not linger from an older
+# install.
+echo "Installing assets to $PREFIX/share"
+rm -rf "$PREFIX/share"
+install -d "$PREFIX/share"
+cp -r "$SOURCE/share/." "$PREFIX/share/"
+find "$PREFIX/share" -type d -exec chmod 0755 {} +
+find "$PREFIX/share" -type f -exec chmod 0644 {} +
+
 echo "Linking $BIN_LINK -> $PREFIX/bin/claude-sandbox"
 ln -sfn "$PREFIX/bin/claude-sandbox" "$BIN_LINK"
 
