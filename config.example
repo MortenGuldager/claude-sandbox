@@ -32,13 +32,17 @@
 # Claude Code's own naming. The host dirs are created on first `create`.
 
 # Output style activated in every sandbox, named by the style's `name:`
-# field rather than its filename. `create` seeds a managed concision
-# style (ste100.md, name STE100) into output-styles/ and writes this
-# value to the sandbox's settings.json, overriding whatever a previous
-# session picked with `/output-style`. Set it to another style's name for
-# a variant of your own, or to "" to leave Claude Code's default style
-# active. A name that no style in the directory declares is refused with
-# a warning. See the README's "Output style" section.
+# field rather than its filename. `create` seeds two managed styles into
+# output-styles/: STE100 (ste100.md), a concision style, and GIST
+# (gist.md), the same discipline plus an explain-from-zero layer and a
+# one-line offer of the deeper axes so you can pull for more. Both are
+# always available; this value picks the default and is written to the
+# sandbox's settings.json, overriding whatever a previous session picked
+# with `/output-style`. Set it to GIST, to another style's name for a
+# variant of your own, or to "" to leave Claude Code's default style
+# active. A name that no style in the directory declares is refused with a
+# warning. Switch per-session with `/output-style`. See the README's
+# "Output style" section.
 #SANDBOX_OUTPUT_STYLE="STE100"
 
 # Resource limits applied at `create` time. A runaway agent inside the

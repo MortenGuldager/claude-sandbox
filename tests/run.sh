@@ -35,15 +35,31 @@ load_fn render_asset
 load_fn sed_escape
 load_fn render_asset_to
 load_fn project_slug_for_path
-load_fn seed_ste100_output_style
+load_fn seed_output_styles
 load_fn output_style_exists
 
 styles="$WORK_DIR/output-styles"
-seed_ste100_output_style "$styles"
+seed_output_styles "$styles"
 style_file="$styles/ste100.md"
 
 assert_true "seeds ste100.md" test -f "$style_file"
 assert_golden "ste100.md matches golden" "$style_file" "ste100.md"
+
+# The GIST variant is seeded alongside, so `/output-style` can switch to
+# it in any sandbox. Same strict-schema and coding-instruction invariants
+# apply.
+gist_file="$styles/gist.md"
+assert_true "seeds gist.md" test -f "$gist_file"
+assert_golden "gist.md matches golden" "$gist_file" "gist.md"
+gist_keys="$(awk 'NR==1 && $0=="---" {inside=1; next}
+                  inside && $0=="---" {exit}
+                  inside && /^[a-zA-Z-]+:/ {sub(/:.*/, ""); print}' "$gist_file" | sort | tr '\n' ' ')"
+assert_eq "variant frontmatter keys are exactly the supported ones" \
+    "description keep-coding-instructions name " "$gist_keys"
+assert_eq "variant declares name GIST" "GIST" \
+    "$(sed -n 's/^name:[[:space:]]*//p' "$gist_file" | head -n1)"
+assert_contains "variant keeps default coding instructions" \
+    "keep-coding-instructions: true" "$gist_file"
 
 # Claude Code parses output-style frontmatter with a *strict* schema:
 # an unknown key makes it drop the style silently, so the accepted keys
@@ -69,7 +85,7 @@ assert_eq "SANDBOX_OUTPUT_STYLE default matches the seeded style name" \
 
 # Re-seeding must be a no-op in content: `create` runs it every time.
 cp "$style_file" "$WORK_DIR/first.md"
-seed_ste100_output_style "$styles"
+seed_output_styles "$styles"
 assert_true "re-seeding is idempotent" cmp -s "$WORK_DIR/first.md" "$style_file"
 
 # --- 3. output style: name lookup -------------------------------------------
@@ -77,7 +93,7 @@ assert_true "re-seeding is idempotent" cmp -s "$WORK_DIR/first.md" "$style_file"
 section "output_style_exists"
 lookup="$WORK_DIR/lookup"
 mkdir -p "$lookup" "$WORK_DIR/empty"
-seed_ste100_output_style "$lookup"
+seed_output_styles "$lookup"
 printf -- '---\nname: "Quoted Name"\ndescription: x\n---\nbody\n' > "$lookup/quoted.md"
 printf -- '---\nname: aXc\ndescription: x\n---\nbody\n' > "$lookup/regexy.md"
 printf -- '---\ndescription: x\n---\nbody\n' > "$lookup/nameless.md"
@@ -99,7 +115,7 @@ load_fn activate_output_style
 
 CONFIG_DIR="$WORK_DIR/cfg"
 mkdir -p "$CONFIG_DIR/output-styles"
-seed_ste100_output_style "$CONFIG_DIR/output-styles"
+seed_output_styles "$CONFIG_DIR/output-styles"
 settings="$STUB_HOME/.claude/settings.json"
 seed_settings() { printf '{"theme":"dark","skipDangerousModePermissionPrompt":true}\n' > "$settings"; }
 
@@ -230,7 +246,7 @@ load_fn project_slug_for_path
 requested="$(grep -oE 'render_asset(_to)? [A-Za-z0-9._/-]+' "$SCRIPT" \
     | awk '{print $2}' | sort -u)"
 assert_eq "script requests at least one asset" \
-    "4" "$(printf '%s\n' "$requested" | grep -c .)"
+    "5" "$(printf '%s\n' "$requested" | grep -c .)"
 absent=""
 for rel in $requested; do
     [ -f "$REPO_ROOT/share/$rel" ] || absent="$absent $rel"

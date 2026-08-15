@@ -66,11 +66,14 @@ SANDBOX_MEMORY_SWAP="2G"
 SANDBOX_CPU="1"
 
 # Claude Code output style activated in every sandbox, by its `name:`
-# field (not its filename). `create` seeds the managed STE100 style into
-# the global output-styles tier and writes this value to settings.json.
-# Blank disables the setting, leaving Claude Code's default style. A name
-# no style declares is refused with a warning rather than written, since
-# Claude Code would silently fall back to the default.
+# field (not its filename). `create` seeds the managed styles (STE100 and
+# the GIST variant) into the global output-styles tier and writes this
+# value to settings.json. Both are always available; this only picks the
+# default. Switch per-session with `/output-style` (e.g. to GIST for a
+# topic you want to explore). Blank disables the setting, leaving Claude
+# Code's default style. A name no style declares is refused with a warning
+# rather than written, since Claude Code would silently fall back to the
+# default.
 SANDBOX_OUTPUT_STYLE="STE100"
 
 # Upstream source for the status reporter. `create` fetches this repo at
@@ -1278,7 +1281,7 @@ attach_claude_persistence_mounts() {
     # global-skill mounts are enumerated below — otherwise on a first-ever
     # create it wouldn't mount into the sandbox until the next create.
     seed_claude_sandbox_skill "$skills_global"
-    seed_ste100_output_style "$styles_global"
+    seed_output_styles "$styles_global"
 
     # Local, writable skills — this project only. Mounted at the native
     # personal-skills path so Claude Code discovers them and can draft here.
@@ -1393,24 +1396,29 @@ seed_claude_sandbox_skill() {
     render_asset_to skills/claude-sandbox/SKILL.md "$skill_dir/SKILL.md"
 }
 
-# Writes the managed STE100 output style into the global output-styles
-# tier. The point is concision: Claude Code's default register produces
+# Writes the managed output styles into the global output-styles tier.
+# The point is concision: Claude Code's default register produces
 # preamble, closing summaries, bold-sprinkled pseudo-headings, and hedged
-# paragraphs, all of which cost reading time and tokens. The style takes
+# paragraphs, all of which cost reading time and tokens. STE100 takes
 # ASD-STE100 in spirit (short sentences, common words, one idea each) but
 # not by the letter — the real standard needs its ~900-word approved
-# dictionary, which we neither ship nor need for this purpose.
+# dictionary, which we neither ship nor need for this purpose. GIST keeps
+# that discipline, adds an explain-from-zero layer, and ends an answer
+# with a one-line offer of the deeper axes so the reader can pull for
+# more. Switch to it with `/output-style` for topics you want to explore.
 #
-# `keep-coding-instructions: true` matters: without it the style replaces
-# Claude Code's default coding instructions instead of adding to them.
+# `keep-coding-instructions: true` in each matters: without it the style
+# replaces Claude Code's default coding instructions instead of adding to
+# them.
 #
-# Body: share/output-styles/ste100.md. Always overwritten on `create` so
-# the style tracks the tool version; drop a differently-named .md in the
-# host-side dir for a variant and point SANDBOX_OUTPUT_STYLE at its name.
-seed_ste100_output_style() {
+# Bodies: share/output-styles/*.md. Always overwritten on `create` so the
+# styles track the tool version; drop another .md in the host-side dir for
+# a further variant and point SANDBOX_OUTPUT_STYLE at its name.
+seed_output_styles() {
     local styles_global="$1"
     mkdir -p "$styles_global"
     render_asset_to output-styles/ste100.md "$styles_global/ste100.md"
+    render_asset_to output-styles/gist.md "$styles_global/gist.md"
 }
 
 # True if $2 names an output style present in the host dir $1 — matched

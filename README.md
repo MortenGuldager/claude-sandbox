@@ -286,13 +286,23 @@ directory under a different name if you want a custom variant.
 
 ### Output style
 
-`create` also seeds a managed Claude Code output style, `ste100.md`, into
-`output-styles/` and selects it in `settings.json`. It is a concision
-style: answer first, one idea per sentence, common words over Latinate
-ones, no preamble, no closing summary, no bold-sprinkled pseudo-headings.
-The name nods to ASD-STE100 (Simplified Technical English) and follows it
-in spirit only — the real standard is built on a ~900-word approved
-dictionary that is neither shipped here nor needed to get concise output.
+`create` also seeds two managed Claude Code output styles into
+`output-styles/` and selects one in `settings.json`. The default,
+`ste100.md` (name `STE100`), is a concision style: answer first, one idea
+per sentence, common words over Latinate ones, no preamble, no closing
+summary, no bold-sprinkled pseudo-headings. The name nods to ASD-STE100
+(Simplified Technical English) and follows it in spirit only - the real
+standard is built on a ~900-word approved dictionary that is neither
+shipped here nor needed to get concise output.
+
+The second, `gist.md` (name `GIST`), keeps that discipline and adds two
+things: an explain-from-zero layer (assume no background, introduce each
+term in plain words before naming it, one accurate analogy per hard
+concept, no baby talk), and progressive disclosure. It answers with the
+core, then, when the topic holds more, ends with one short line naming the
+deeper axes so you can pull for the rest ("Want the chemistry, sizing, or
+how it compares?") or just say thanks. Switch to it with `/output-style`
+for a topic you want to explore, and back to `STE100` for everyday work.
 
 The style is `keep-coding-instructions: true`, so it adds a register on
 top of Claude Code's default coding instructions instead of replacing
@@ -302,13 +312,13 @@ style's `name:` field, not its filename. A name no style in the directory
 declares is refused with a warning rather than written, since Claude Code
 would otherwise fall back to the default without saying so.
 
-The style ships as `share/output-styles/ste100.md`, so editing the rules
-is an ordinary markdown edit; `create` copies it out, overwriting the
-host-side copy every time, like the managed skill. To use it outside a
-sandbox, copy that file into your own `~/.claude/output-styles/` and set
-`"outputStyle": "STE100"` in `~/.claude/settings.json`. For a variant,
-drop another `.md` in the host-side directory and point
-`SANDBOX_OUTPUT_STYLE` at its name. Styles are global only, with no local
+The styles ship as `share/output-styles/*.md`, so editing the rules is an
+ordinary markdown edit; `create` copies them out, overwriting the
+host-side copies every time, like the managed skill. To use one outside a
+sandbox, copy its file into your own `~/.claude/output-styles/` and set
+`"outputStyle": "STE100"` (or `"GIST"`) in
+`~/.claude/settings.json`. For a further variant, drop another `.md` in
+the host-side directory and point `SANDBOX_OUTPUT_STYLE` at its name. Styles are global only, with no local
 tier and no write access from inside the sandbox: how Claude writes is a
 standing preference of yours, not something a sandbox should redefine for
 itself. `/output-style` inside a session still switches style for that
@@ -598,7 +608,7 @@ bin/claude-sandbox    # host-side CLI
 share/                # prose payloads the CLI writes into a sandbox
   claude/CLAUDE.md              # always-loaded stub
   hooks/                        # SessionStart hook script
-  output-styles/ste100.md       # concision output style
+  output-styles/                # concision (ste100) + gist variant
   skills/claude-sandbox/        # managed skill
 config.example        # documented settings
 install.sh / uninstall.sh
