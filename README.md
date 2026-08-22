@@ -324,6 +324,30 @@ standing preference of yours, not something a sandbox should redefine for
 itself. `/output-style` inside a session still switches style for that
 session, but `create` resets the setting to the configured value.
 
+### Closed-question hook
+
+An output style is standing prose, and it competes with every other standing
+instruction in the context. In practice that is enough to shape word choice
+but not enough to stop a yes/no question from drawing a page of argument. So
+`create` also installs a `UserPromptSubmit` hook,
+`share/hooks/closed-question.sh`, that pushes a form rule into the turn
+itself: first word is the answer, then at most two sentences of grounds, then
+stop.
+
+Placement is the point, not volume. The hook's text is the most recent thing
+in context when the answer is written, where a rule on line 140 of a style
+file is not, and it only fires on prompts that look like a closed question,
+so it dilutes nothing else. The heuristic is deliberately crude: the first
+word is a yes/no opener in Danish or English, the prompt contains a question
+mark, and the prompt is under 600 characters. A long prompt that opens with
+"kan" is a work request, so it is left alone.
+
+The hook fails open. It has no `set -e`, exits quietly when `jq` is absent or
+the payload will not parse, and never returns the exit code that would block
+a prompt: a style nicety must not cost you your turn. Edit the rule as
+ordinary shell, or drop the hook by deleting the asset and its two
+`render_asset` lines in `seed_claude_hooks`.
+
 ### Timezone
 
 `create` resolves the host's timezone (`timedatectl` → `/etc/timezone`
@@ -607,7 +631,7 @@ Claude-specific (`csb-` prefix).
 bin/claude-sandbox    # host-side CLI
 share/                # prose payloads the CLI writes into a sandbox
   claude/CLAUDE.md              # always-loaded stub
-  hooks/                        # SessionStart hook script
+  hooks/                        # SessionStart + UserPromptSubmit hooks
   output-styles/                # concision (ste100) + gist variant
   skills/claude-sandbox/        # managed skill
 config.example        # documented settings
@@ -629,7 +653,7 @@ The reporter is no longer vendored here; `create` fetches it from
 ## Tests
 
 `tests/run.sh` pins what a sandbox receives: the seeded output style, the
-`SessionStart` hook, the generated `CLAUDE.d` docs, and the managed skill
+hook scripts, the generated `CLAUDE.d` docs, and the managed skill
 are compared byte-for-byte against `tests/golden/`, alongside behavioural
 checks on style-name lookup, the `settings.json` merge, and installer
 completeness. It stubs `incus`, so it runs anywhere — including inside a

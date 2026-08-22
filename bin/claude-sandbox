@@ -681,48 +681,70 @@ seed_claude_first_run_state() {
     ' _ "$REPO_DIR"
 }
 
-# Pushes the always-on global memory index into session context at start.
-# Per-project memory under ~/.claude/projects/<slug>/memory/ is auto-loaded
-# by Claude Code, but the cross-project global-memory mount has no native
-# location: the CLAUDE.md stub only *points* at it, a pull the model can skip
-# under time pressure (a /resume that dives straight into work is exactly the
-# case that bit us). A SessionStart hook makes it a push instead — on startup,
-# resume, clear, and compact it emits the index as additionalContext so it
-# cannot be missed. Both the hook script and settings.json live in the
-# ephemeral ~/.claude and are re-seeded on every create, so this is idempotent.
-seed_global_memory_hook() {
-    local hook_script="/home/ubuntu/.claude/hooks/inject-global-memory.sh"
+# Installs the managed Claude Code hooks. Two of them, both pushes of
+# something the model would otherwise have to pull:
+#
+#   SessionStart      -> inject-global-memory.sh
+#     Per-project memory under ~/.claude/projects/<slug>/memory/ is auto-loaded
+#     by Claude Code, but the cross-project global-memory mount has no native
+#     location: the CLAUDE.md stub only *points* at it, a pull the model can
+#     skip under time pressure (a /resume that dives straight into work is
+#     exactly the case that bit us). On startup, resume, clear, and compact the
+#     hook emits the index as additionalContext so it cannot be missed.
+#
+#   UserPromptSubmit  -> closed-question.sh
+#     The output style asks for concision, but it is standing prose competing
+#     with every other standing instruction, and closed questions still drew
+#     pages of argument. The hook puts a checkable form rule at the top of the
+#     turn instead, and only for prompts that look like a closed question.
+#
+# Hook scripts and settings.json both live in the ephemeral ~/.claude and are
+# re-seeded on every create, so this is idempotent.
+seed_claude_hooks() {
+    local session_hook="/home/ubuntu/.claude/hooks/inject-global-memory.sh"
+    local prompt_hook="/home/ubuntu/.claude/hooks/closed-question.sh"
 
-    # The hook is a real shell script, so it lives as one under
-    # share/hooks/ where shellcheck and an editor can see it.
+    # The hooks are real shell scripts, so they live as ones under
+    # share/hooks/ where shellcheck and an editor can see them. Rendered by
+    # literal name, not in a loop: the asset tests grep this file for
+    # `render_asset <path>` to catch an asset that nothing installs.
     local content
     content="$(render_asset hooks/inject-global-memory.sh)"
-    printf '%s\n' "$content" | write_sandbox_user_file "$hook_script"
-    incus exec "$CONTAINER_NAME" -- sudo -u ubuntu chmod 0755 "$hook_script"
+    printf '%s\n' "$content" | write_sandbox_user_file "$session_hook"
+    incus exec "$CONTAINER_NAME" -- sudo -u ubuntu chmod 0755 "$session_hook"
 
-    # Merge the hook into settings.json without disturbing what
+    content="$(render_asset hooks/closed-question.sh)"
+    printf '%s\n' "$content" | write_sandbox_user_file "$prompt_hook"
+    incus exec "$CONTAINER_NAME" -- sudo -u ubuntu chmod 0755 "$prompt_hook"
+
+    # Merge the hooks into settings.json without disturbing what
     # seed_claude_first_run_state already wrote (read-modify-write, seeded
     # from {} if absent). One matcher entry per source: SessionStart matchers
     # have no catch-all, and we want startup + resume in particular, plus
     # clear/compact so a rebuilt context re-surfaces the standing rules.
+    # UserPromptSubmit takes no matcher, so it gets a single entry.
     # shellcheck disable=SC2016
     incus exec "$CONTAINER_NAME" -- sudo -u ubuntu -H bash -c '
         set -e
         cmd=$1
+        prompt_cmd=$2
         settings=~/.claude/settings.json
         tmp=$(mktemp)
         mkdir -p ~/.claude
         [ -f "$settings" ] || echo "{}" > "$settings"
-        jq --arg cmd "$cmd" "
+        jq --arg cmd "$cmd" --arg prompt_cmd "$prompt_cmd" "
             .hooks.SessionStart = [
               {matcher: \"startup\", hooks: [{type: \"command\", command: \$cmd}]},
               {matcher: \"resume\",  hooks: [{type: \"command\", command: \$cmd}]},
               {matcher: \"clear\",   hooks: [{type: \"command\", command: \$cmd}]},
               {matcher: \"compact\", hooks: [{type: \"command\", command: \$cmd}]}
             ]
+            | .hooks.UserPromptSubmit = [
+              {hooks: [{type: \"command\", command: \$prompt_cmd}]}
+            ]
         " "$settings" > "$tmp" && mv "$tmp" "$settings"
         rm -f "$tmp"
-    ' _ "$hook_script"
+    ' _ "$session_hook" "$prompt_hook"
 }
 
 write_reporter_env_file() {
@@ -1056,8 +1078,8 @@ cmd_create() {
     echo "Pre-accepting Claude Code first-run prompts (theme, onboarding, trust, bypass)..."
     seed_claude_first_run_state
 
-    echo "Installing SessionStart hook to auto-load global memory..."
-    seed_global_memory_hook
+    echo "Installing hooks (global-memory autoload, closed-question form)..."
+    seed_claude_hooks
 
     if [ -n "$SANDBOX_OUTPUT_STYLE" ]; then
         echo "Selecting output style: $SANDBOX_OUTPUT_STYLE"

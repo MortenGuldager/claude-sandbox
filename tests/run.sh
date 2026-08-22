@@ -147,16 +147,20 @@ assert_eq "creates settings.json when absent" "STE100" "$(jq -r '.outputStyle' "
 
 CONFIG_DIR="/test/config"
 
-# --- 5. SessionStart hook ---------------------------------------------------
+# --- 5. hooks ---------------------------------------------------------------
 
-section "global-memory hook"
-load_fn seed_global_memory_hook
-seed_global_memory_hook
+section "managed hooks"
+load_fn seed_claude_hooks
+seed_claude_hooks
 hook="$CAPTURE_DIR/inject-global-memory.sh"
+cq="$CAPTURE_DIR/closed-question.sh"
 
 assert_true "writes the hook script" test -f "$hook"
 assert_golden "hook matches golden" "$hook" "inject-global-memory.sh"
 assert_true "hook parses" bash -n "$hook"
+assert_true "writes the closed-question hook" test -f "$cq"
+assert_golden "closed-question hook matches golden" "$cq" "closed-question.sh"
+assert_true "closed-question hook parses" bash -n "$cq"
 case "$INCUS_LOG" in
     *"chmod 0755"*) pass "hook is made executable" ;;
     *) fail "hook is made executable" "no chmod in incus log" ;;
@@ -164,6 +168,10 @@ esac
 case "$INCUS_LOG" in
     *'.hooks.SessionStart'*) pass "hook is registered in settings.json" ;;
     *) fail "hook is registered in settings.json" "no jq settings merge in incus log" ;;
+esac
+case "$INCUS_LOG" in
+    *'.hooks.UserPromptSubmit'*) pass "closed-question hook is registered" ;;
+    *) fail "closed-question hook is registered" "no UserPromptSubmit in incus log" ;;
 esac
 
 # Behaviour: with an index present the hook must emit the documented
@@ -183,6 +191,38 @@ fi
 : > "$STUB_HOME/.claude/global-memory/MEMORY.md"
 out="$(HOME="$STUB_HOME" "$hook" 2>/dev/null)"
 assert_eq "empty index emits nothing" "" "$out"
+
+# Behaviour: the closed-question hook must fire on a short yes/no question
+# and stay silent otherwise. It reads the prompt as JSON on stdin.
+chmod +x "$cq"
+cq_ctx() {
+    jq -nc --arg p "$1" '{prompt:$p}' | "$cq" 2>/dev/null \
+        | jq -r '.hookSpecificOutput.additionalContext // ""'
+}
+assert_contains_str() {
+    case "$2" in
+        *"$3"*) pass "$1" ;;
+        *) fail "$1" "missing '$3' in: $2" ;;
+    esac
+}
+
+out="$(cq_ctx 'er det en god ide?')"
+assert_contains_str "fires on a Danish yes/no question" "$out" "first word is the answer"
+assert_eq "emits UserPromptSubmit event" "UserPromptSubmit" \
+    "$(jq -nc --arg p 'kan vi det?' '{prompt:$p}' | "$cq" 2>/dev/null \
+        | jq -r '.hookSpecificOutput.hookEventName')"
+assert_eq "fires on an English yes/no question" "0" \
+    "$([ -n "$(cq_ctx 'should we merge this?')" ] && echo 0 || echo 1)"
+assert_eq "ignores a question with no yes/no opener" "" \
+    "$(cq_ctx 'hvorfor virker det ikke?')"
+assert_eq "ignores a statement" "" "$(cq_ctx 'kan vi lige rette det')"
+assert_eq "ignores an empty prompt" "" "$(cq_ctx '')"
+# A long prompt is a work request even when it opens like a question.
+long="kan du $(printf 'x%.0s' $(seq 1 700))?"
+assert_eq "ignores a long prompt" "" "$(cq_ctx "$long")"
+# Fail-open: malformed stdin must not produce output or a blocking exit.
+printf 'not json\n' | "$cq" >/dev/null 2>&1
+assert_eq "malformed payload exits 0" "0" "$?"
 
 # --- 6. generated documents -------------------------------------------------
 
@@ -246,7 +286,7 @@ load_fn project_slug_for_path
 requested="$(grep -oE 'render_asset(_to)? [A-Za-z0-9._/-]+' "$SCRIPT" \
     | awk '{print $2}' | sort -u)"
 assert_eq "script requests at least one asset" \
-    "5" "$(printf '%s\n' "$requested" | grep -c .)"
+    "6" "$(printf '%s\n' "$requested" | grep -c .)"
 absent=""
 for rel in $requested; do
     [ -f "$REPO_ROOT/share/$rel" ] || absent="$absent $rel"
